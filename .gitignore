@@ -1,3 +1,22 @@
-/src/avg_shortest_path_length.pdf
-/src/avg_cosine_similarity.pdf
-/src/agent_ccRCC_retrained.th
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyz
+*.pyw
+*.pyc
+.env
+.venv/
+venv/
+ENV/
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# 其他
+.DS_Store
+*.log

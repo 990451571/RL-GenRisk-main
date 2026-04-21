@@ -74,7 +74,6 @@ class DeepQNetwork:
         self.cost_his_q = []
         T = 3
         ALPHA = 0.001
-        self.sync_target_frames = 100
         self.Q = Q_Fun(self.embedding_size, self.embedding_size, T, ALPHA, self.net_ori)
         self.Q_target = Q_Fun(self.embedding_size, self.embedding_size, T, ALPHA, self.net_ori)
         self.memory = ReplayBuffer(self.memory_size, self.n_actions)
@@ -334,9 +333,27 @@ class DeepQNetwork:
         sel_action = torch.LongTensor(sel_action).to(self.Q.device)
 
                 # ========== 计算目标 Q 值 y_t ==========
-        # 调用 _max_Q：用目标 Q 网络计算下一状态 S' 的最大 Q 值 maxQ(s',a')
-        temp = self._max_Q(mu, new_state, action_index_new, sel_action).unsqueeze(-1)
-        # 对应论文公式：y_t = r + γ * maxQ(s',a')
+        # ========== 计算目标 Q 值 y_t (Double DQN 升级版) ==========
+        with torch.no_grad():  # 眺望未来不需要计算梯度，省显存+加速
+            # 第一步：在线网络 (self.Q) 当“玩家”，评估 S' 的所有动作
+            next_q_values_online, _ = self.Q(mu, new_state, action_index_new, batch_flag=True)
+
+            # ⚠️ 极其关键的“掩码(Masking)”操作：
+            # action_index_new 中为 0 代表该基因已经入选，不能再挑了。
+            # 我们把这些不可选基因的 Q 值强行变成 -1e9（极小值），防止 argmax 选错。
+            mask = (action_index_new == 0)
+            next_q_values_online = next_q_values_online.masked_fill(mask, -1e9)
+
+            # 玩家做出决定：找出最高分的动作索引，对应公式里的 argmax a'
+            best_next_actions = next_q_values_online.argmax(dim=1, keepdim=True)
+
+            # 第二步：目标网络 (self.Q_target) 当“裁判”，对 S' 进行独立打分
+            next_q_values_target, _ = self.Q_target(mu, new_state, action_index_new, batch_flag=True)
+
+            # 裁判公布成绩：从裁判的打分表里，提取出玩家刚刚挑中的那个基因的分数
+            temp = next_q_values_target.gather(1, best_next_actions)
+
+        # 对应 DDQN 论文公式：y_t = r + γ * Q_target(s', argmax Q_online(s',a'))
         y_target = torch.add(reward_sum, temp * self.gamma).detach()
         # ========== 计算当前 Q 值 Q(s,a;θ) ==========
         y_pred, _ = self.Q(mu, state, action_index, batch_flag=True)# 用 Q 网络计算当前状态 S 的所有 Q 值
@@ -346,6 +363,8 @@ class DeepQNetwork:
         loss = torch.mean(torch.pow(y_target - y_pred, 2))
         # ==========  反向传播更新 Q 网络权重 ==========
         loss.backward()
+        # 🛡️ 新增：梯度裁剪防弹衣！强行把超过 1.0 的极端梯度削平，防止网络崩溃
+        torch.nn.utils.clip_grad_norm_(self.Q.parameters(), max_norm=1.0)
         self.Q.optimizer.step()
         self.cost_his.append(loss.item())
         # 更新 epsilon（探索概率衰减：越往后，探索越少，利用越多）
@@ -358,11 +377,6 @@ class DeepQNetwork:
             # 对应公式：θ' = τ*θ + (1-τ)*θ'
             target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
-    def _max_Q(self, mu, state, action_index, sel_action, batch_flag=True):
-        Q, _ = self.Q_target(mu, state, action_index, batch_flag=True)  # [batch_size*N]
-        Q_sel = torch.mul(Q, sel_action)
-        value, index = torch.max(Q_sel, 1)
-        return value
 
     def save(self, path, cancer):
         torch.save(self.Q.state_dict(), ("{}/agent_" + cancer + ".th").format(path))
