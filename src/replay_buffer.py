@@ -5,15 +5,15 @@ from torch_geometric.data import Data, Batch
 
 class ReplayBuffer:
     def __init__(self, max_size,n_actions):
-        self.mem_size = max_size
-        self.mem_cntr = 0
-        self.n_actions=n_actions
+        self.mem_size = max_size # 经验池最大容量
+        self.mem_cntr = 0  # 经验计数器
+        self.n_actions=n_actions # 基因节点数
         self.embedding_size=64
         # self.graph_memory = [None] * self.mem_size
-        self.memory_s = np.zeros((self.mem_size, self.n_actions,3))
-        self.memory_a = np.zeros((self.mem_size, 1))
-        self.memory_r = np.zeros((self.mem_size,1))
-        self.memory_ai = np.zeros((self.mem_size, self.n_actions))
+        self.memory_s = np.zeros((self.mem_size, self.n_actions,3)) # 存储状态
+        self.memory_a = np.zeros((self.mem_size, 1)) # 存储动作
+        self.memory_r = np.zeros((self.mem_size,1)) # 存储奖励
+        self.memory_ai = np.zeros((self.mem_size, self.n_actions)) # 已选/未选基因的标记
         self.memory_sa = np.zeros((self.mem_size, self.n_actions))
     def store_transition(self,  state, action, reward,action_index,sel_action):
         # graph = Data(edge_index=torch.tensor(edge_index, dtype=torch.float32))
@@ -24,7 +24,8 @@ class ReplayBuffer:
         # graph.new_state = torch.tensor(state_, dtype=torch.float32)
         # graph.done = torch.tensor(done)
         # graph.action_index = torch.LongTensor(action_index)
-        index = self.mem_cntr % self.mem_size
+        # ========== 把经验存入对应的数组 ==========
+        index = self.mem_cntr % self.mem_size # 先进先出，超过即覆盖
         self.memory_s[index, :] = state
         self.memory_a[index, :] = action
         self.memory_r[index, :] = reward
@@ -36,12 +37,14 @@ class ReplayBuffer:
         self.mem_cntr += 1
 
     def sample_buffer(self, batch_size):
+        # ========== 确定可选的经验索引范围 ==========
         if self.mem_cntr > self.mem_size:
             selete = [x for x in range(self.mem_size)]
-            sample_index = np.random.choice(selete, size=batch_size)
         else:
             selete = [x for x in range(self.mem_cntr)]
-            sample_index = np.random.choice(selete, size=batch_size)
+        # ========== 随机采样 batch_size 个索引 ==========
+        sample_index = np.random.choice(selete, size=batch_size)
+        # ========== 根据索引取出对应的批次数据 ==========
         batch_s = self.memory_s[sample_index, :]
         batch_a = self.memory_a[sample_index, :]
         batch_r = self.memory_r[sample_index, :]

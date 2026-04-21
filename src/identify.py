@@ -9,7 +9,8 @@ import random
 from sklearn import preprocessing
 from statsmodels.stats.multitest import multipletests
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '4,5'
+# 🚀 关键修复 1：把显卡视野切回你电脑上的唯一主卡 (GPU 0)
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import torch
 
@@ -68,7 +69,6 @@ def get_feature(net, weights, gene_name, gene_final):
         if gene in list(gene_final.keys()):
             feature[i][2] = len(gene_final[gene])
         i = i + 1
-    # feature = Normalized_minmax(feature)
     feature = Normalized(feature)
 
     return feature
@@ -163,7 +163,7 @@ def get_average_STPL(gene_ranking, G_hprd, lst_gold, random_samples):
                 length = nx.shortest_path_length(G_hprd, y, x)
                 lst_lengths.append(length)
             else:
-                lst_lengths.append(15)  # use 11 as max value
+                lst_lengths.append(15)
         dict_average_STPL[x] = np.nanmean(lst_lengths)
         lst_data.append(np.nanmean(lst_lengths))
 
@@ -172,8 +172,6 @@ def get_average_STPL(gene_ranking, G_hprd, lst_gold, random_samples):
         lst_random_value.append(dict_average_STPL[x])
     for x in gene_ranking:
         p_greater, p_lesser = one_side_ttest(dict_average_STPL[x], lst_random_value)
-        # if p_lesser < 1e-160:
-        # p_lesser = "< 1e-160"
         dict_average_STPL_p[x] = p_lesser
     return dict_average_STPL, dict_average_STPL_p
 
@@ -203,8 +201,6 @@ def get_average_CS(gene_ranking, lst_gold, dict_embedding, random_samples):
         lst_random_value.append(dict_average_CS[x])
     for x in gene_ranking:
         p_greater, p_lesser = one_side_ttest(dict_average_CS[x], lst_random_value)
-        # if p_greater < 1e-160:
-        # p_greater = "< 1e-160"
         dict_average_CS_p[x] = p_greater
     return dict_average_CS, dict_average_CS_p
 
@@ -225,16 +221,6 @@ def FDR_adj_P(dict_average_STPL_p, dict_average_CS_p, gene_ranking):
         tmp_gene = gene_ranking[i]
         tmp_FDR_p_STPL = pvals_corrected_STPL[i]
         tmp_FDR_p_CS = pvals_corrected_CS[i]
-        tmp_BF_p_STPL = min(1.0, dict_average_STPL_p[x] * base)
-        tmp_BF_p_CS = min(1.0, dict_average_CS_p[x] * base)
-        # tmp_BF_p_STPL = dict_average_STPL_p[x]
-        # tmp_BF_p_CS = dict_average_CS_p[x]
-
-        # if tmp_FDR_p_STPL < 1e-160:
-        #     tmp_FDR_p_STPL = "< 1e-160"
-        # if tmp_FDR_p_CS < 1e-160:
-        #     tmp_FDR_p_CS = "< 1e-160"
-
         dict_average_STPL_FDR_p[tmp_gene] = tmp_FDR_p_STPL
         dict_average_CS_FDR_p[tmp_gene] = tmp_FDR_p_CS
 
@@ -249,6 +235,7 @@ def run(gene_final, score_alpha):
     f2 = open(log_path + "/log_" + cancer + ".txt", "w")
     save_path = "../data/agent_ccRCC.th"
 
+    print("🧠 正在唤醒模型大脑...")
     RL.load(save_path)
 
     RL.clear_mem()
@@ -261,9 +248,10 @@ def run(gene_final, score_alpha):
     pat_num = len(set(patient))
     RL.pat_num = pat_num
 
+    print("📊 AI 正在给 9000 多个基因进行地毯式打分，请稍候...")
     action_sel = [i for i in range(RL.n_actions)]
     action_index = RL.choose_action(feature, action_sel, RL.actions_index)
-    f = open("Ranking_List.txt", "w")
+    f = open("Ranking_List_author.txt", "w")
     result = []
     for i in range(len(action_index)):
         result.append([gene_name[i], action_index[i]])
@@ -272,6 +260,7 @@ def run(gene_final, score_alpha):
     for i in range(len(action_index)):
         gene_ranking.append(result[i][0])
 
+    print("🔬 正在计算生物学网络特征 (短路径与余弦相似度)...")
     G_hprd, lst_gold, dict_embedding = get_data_output()
 
     random_lst = [i for i in range(len(gene_ranking))]
@@ -290,7 +279,6 @@ def run(gene_final, score_alpha):
         'Gene' + "\t" + "Average shortest path length to known risk genes" + "\t" + "FDR p-value (Average shortest path length)" + "\t" + "Average cosine similarity with known risk genes" + "\t" + "FDR p-value (Average cosine similarity)",
         file=f)
 
-    # print('Gene' + "\t" + "Average shortest path length to known risk genes" +"\t" +"p-value (Average shortest path length)" + "\t" +"Average cosine similarity with known risk genes" +"\t" + "p-value (Average cosine similarity)", file = f)
     for i in range(len(action_index)):
         x = result[i][0]
         out = result[i][0]
@@ -298,8 +286,8 @@ def run(gene_final, score_alpha):
             out = "KMT2D"
         print(out + "\t" + str(dict_average_STPL[x]) + "\t" + str(dict_average_STPL_FDR_p[x]) + "\t" + str(
             dict_average_CS[x]) + "\t" + str(dict_average_CS_FDR_p[x]), file=f)
-    print(action_index, action_index.shape)
     f.close()
+    print("🎉 恭喜！最终致癌潜力排名清单 Ranking_List.txt 已生成！")
     exit()
 
     return gene_sort
@@ -330,10 +318,17 @@ if __name__ == "__main__":
     network, gene_final, gene_name = getNetworkall(gene_data)
     weights = getWeight(gene_name)
 
+    # 🚀 关键修复 2：防弹装甲，补齐缺失的突变权重（防止报错 A1BG 找不到）
+    for g in gene_name:
+        if g not in weights:
+            weights[g] = 0.0
+
     feature = get_feature(network, weights, gene_name, gene_final)
 
     len_gene = len(gene_name)
     score_alpha = 0.5
+
+    # 实例化模型大总管
     RL = DeepQNetwork(len_gene, network[:, :], feature[:, :], 64,
                       train_patient_data=train_patient_data,
                       test_patient_data=test_patient_data,
@@ -345,16 +340,5 @@ if __name__ == "__main__":
                       replace_target_iter=100,
                       memory_size=3000,
                       score_alpha=score_alpha
-                      # output_graph=True
                       )
     gene_sort = run(gene_final, score_alpha)
-
-
-
-
-
-
-
-
-
-

@@ -79,14 +79,11 @@ class DeepQNetwork:
         self.Q_target = Q_Fun(self.embedding_size, self.embedding_size, T, ALPHA, self.net_ori)
         self.memory = ReplayBuffer(self.memory_size, self.n_actions)
         self.score_alpha = score_alpha
-
-        # 🔴 关键修复 1：补上原作者漏掉的 pat_num 赋值！(彻底修复 AttributeError)
         self.pat_num = pat_num
-
         self.embedding = None
 
         for name, param in self.Q.named_parameters():
-            pass  # 屏蔽原本啰嗦的打印
+            pass
 
     def laplacian(self, net):
         lap = copy.deepcopy(net)
@@ -142,22 +139,29 @@ class DeepQNetwork:
         self.memory_counter += 1
 
     def getState(self, feature_new, network_new):
+        # 1. 执行TensorFlow计算图，获取所有节点的嵌入向量
         embedding = self.sess.run(self.emb_node,
                                   feed_dict={self.feature_ori: feature_new,
                                              self.net: network_new})
+        # 2. 对所有节点的嵌入向量按维度求和，聚合为全局状态
         s = np.sum(embedding, axis=0, keepdims=True)
+        # 3. 返回图的全局状态向量
         return s
 
     def getAction(self, network_new, action_selold, action_index):
-        i = self.actions[-1]
-        action_selold.remove(i)
-        action_index[i] = 0
+        i = self.actions[-1]# 取最后一个被选中的节点（上一步的动作）
+        action_selold.remove(i) # 从可选列表中删掉它（选过的不能再选）
+        action_index[i] = 0# 标记这个节点：不可选
+        # 遍历图中所有节点j
         for j in range(network_new.shape[0]):
+            # 节点i和j是邻居、j不在可选列表里、j没被选过（不在历史动作里）
             if self.net_ori[i][j] > 0 and j not in action_selold and j not in self.actions:
-                action_selold.append(j)
-                action_index[j] = 1
-        if len(action_selold) == 0:
+                action_selold.append(j)# 加入可选列表
+                action_index[j] = 1# 标记为可选
+
+        if len(action_selold) == 0:# 如果可选列表空了
             for i in self.gene_ori:
+            # 遍历所有原始节点
                 if i not in self.actions:
                     action_selold.append(i)
                     action_index[i] = 1
@@ -185,13 +189,16 @@ class DeepQNetwork:
         return qt
 
     def choose_action(self, state, action_sel, action_index):
+        # 判断是否有可选动作，有则执行决策
         if len(action_sel) > 0:
             state = torch.tensor(state, dtype=torch.float32).to(self.Q.device)
             action_index = torch.LongTensor(action_index).to(self.Q.device)
-
+            # 调用在线Q网络，计算所有可选动作的Q值
             actions_value, self.embedding = self.Q(self.embedding, state, action_index)
-            actions_value = actions_value.detach().numpy()
+            actions_value = actions_value.detach().cpu().numpy()
+            # 返回所有可选动作的Q值评分
             return actions_value
+        # 无可选动作时，返回0
         return 0
 
     def getQt(self, feature_new, network_new, s_):
@@ -208,21 +215,26 @@ class DeepQNetwork:
         return qt
 
     def get_reward(self, gene_num, gene_name):
-        weight_sum = 0
+        weight_sum = 0 # 选中基因的总权重
         gene_name = list(gene_name)
-        patient_num = []
-        gene_sta_num = 0
+        patient_num = [] # 选中基因关联的所有病人
+        gene_sta_num = 0 # 选中的【目标基因】数量
         for i in self.actions:
-            gene = gene_name[i]
+            gene = gene_name[i] # 节点编号 → 转换成真实基因名
+            # 统计1：如果选中的基因是【目标基因】，计数+1
             if gene in self.gene_sta:
                 gene_sta_num = gene_sta_num + 1
+            # 统计2：累加基因权重 + 收集关联病人
             if gene not in list(gene_num.keys()):
+                # 基因无关联病人，只累加权重
                 weight_sum = weight_sum + self.weights[gene]
             else:
+                # 基因有关联病人，加入病人列表 + 累加权重
                 patient_num.extend(gene_num[gene])
                 weight_sum = weight_sum + self.weights[gene]
-        return weight_sum * self.n_actions / 150, (self.pat_num - len(set(patient_num))) / self.pat_num, (
-                    len(self.actions) - gene_sta_num) / len(self.actions)
+        return (weight_sum * self.n_actions / 150, # 奖励1：基因权重奖励
+                (self.pat_num - len(set(patient_num))) / self.pat_num, # 奖励2：病人覆盖奖励
+                (len(self.actions) - gene_sta_num) / len(self.actions))  # 奖励3：目标基因匹配奖励
 
     def getAcc(self, actions, patients, gene_name):
         cover_num = 0
@@ -300,43 +312,51 @@ class DeepQNetwork:
         self.memory.clear()
 
     def learn(self):
+        # ========== 从经验回放池采样一批经验 ==========
+        # 对应：(S, A, R, S', 动作掩码)
         state, action, reward_sum, action_index, sel_action = self.memory.sample_buffer(self.batch_size)
+        # 清空 Q 网络的梯度（上一步的梯度残留要清掉）
         self.Q.optimizer.zero_grad()
         mu = None
         action_temp = copy.deepcopy(action)
         action_index_new = copy.deepcopy(action_index)
+        # 构造「下一状态 S'」的动作掩码（把当前动作 A 设为已选）
         for i in range(self.batch_size):
             action_temp_real = int(action_temp[i])
             action_index_new[i, action_temp_real] = 0
 
         state = torch.tensor(state, dtype=torch.float32).to(self.Q.device)
-
-        # 🔴 关键修复 2：强制增加维度对齐，防止张量运算爆炸和 Gather 崩溃！
         action = torch.LongTensor(action).view(-1, 1).to(self.Q.device)
         reward_sum = torch.tensor(reward_sum, dtype=torch.float32).view(-1, 1).to(self.Q.device)
-
         new_state = state.clone()
         action_index = torch.LongTensor(action_index).to(self.Q.device)
         action_index_new = torch.LongTensor(action_index_new).to(self.Q.device)
         sel_action = torch.LongTensor(sel_action).to(self.Q.device)
 
+                # ========== 计算目标 Q 值 y_t ==========
+        # 调用 _max_Q：用目标 Q 网络计算下一状态 S' 的最大 Q 值 maxQ(s',a')
         temp = self._max_Q(mu, new_state, action_index_new, sel_action).unsqueeze(-1)
-
+        # 对应论文公式：y_t = r + γ * maxQ(s',a')
         y_target = torch.add(reward_sum, temp * self.gamma).detach()
-
-        y_pred, _ = self.Q(mu, state, action_index, batch_flag=True)
-        y_pred = y_pred.gather(1, action)
-
+        # ========== 计算当前 Q 值 Q(s,a;θ) ==========
+        y_pred, _ = self.Q(mu, state, action_index, batch_flag=True)# 用 Q 网络计算当前状态 S 的所有 Q 值
+        y_pred = y_pred.gather(1, action)# 只取「实际执行的动作 A」对应的 Q 值
+        # ========== 计算损失函数 Loss  ==========
+        # 对应论文公式：L = (y_t - Q(s,a;θ))²
         loss = torch.mean(torch.pow(y_target - y_pred, 2))
+        # ==========  反向传播更新 Q 网络权重 ==========
         loss.backward()
         self.Q.optimizer.step()
-
         self.cost_his.append(loss.item())
-
+        # 更新 epsilon（探索概率衰减：越往后，探索越少，利用越多）
         self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon > self.epsilon_max else self.epsilon_max
         self.learn_step_counter += 1
-        if self.learn_step_counter % self.sync_target_frames == 0:
-            self.Q_target.load_state_dict(self.Q.state_dict())
+        # ========== 软更新目标 Q 网络 θ⁻ ==========
+        # 每次 learn() 都让目标网络向当前 Q 网络平滑逼近一点点
+        tau = 0.005  # 平滑系数 (通常取 0.001 到 0.005 之间，你也可以把它写进 __init__ 中作为 self.tau)
+        for target_param, local_param in zip(self.Q_target.parameters(), self.Q.parameters()):
+            # 对应公式：θ' = τ*θ + (1-τ)*θ'
+            target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
     def _max_Q(self, mu, state, action_index, sel_action, batch_flag=True):
         Q, _ = self.Q_target(mu, state, action_index, batch_flag=True)  # [batch_size*N]

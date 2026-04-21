@@ -2,9 +2,44 @@ import numpy as np
 import copy
 import random
 import torch
+import os
 import inputall
+import matplotlib.pyplot as plt
 from DQN import DeepQNetwork
 
+
+def plot_training_results(rewards, losses, save_path="../data/RL_GenRisk_Training_Curves.png"):
+    """
+    一键生成并保存双拼训练曲线图（奖励值 & 损失值）
+    """
+    plt.figure(figsize=(12, 5))
+
+    # ========== 图 1：累计奖励曲线 ==========
+    plt.subplot(1, 2, 1)
+    plt.plot(rewards, color='#1f77b4', linewidth=1.5, alpha=0.9)
+    plt.title("Cumulative Reward per Episode", fontsize=14, fontweight='bold')
+    plt.xlabel("Episode", fontsize=12)
+    plt.ylabel("Reward", fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # ========== 图 2：损失函数曲线 ==========
+    plt.subplot(1, 2, 2)
+    if len(losses) > 100:
+        window = 50
+        smoothed_losses = np.convolve(losses, np.ones(window) / window, mode='valid')
+        plt.plot(smoothed_losses, color='#d62728', linewidth=1.5, alpha=0.9)
+    else:
+        plt.plot(losses, color='#d62728', linewidth=1.5, alpha=0.9)
+
+    plt.title("Training Loss (Smoothed)", fontsize=14, fontweight='bold')
+    plt.xlabel("Training Step", fontsize=12)
+    plt.ylabel("Loss", fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # ========== 保存图片 ==========
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\n📈 训练图表已自动生成并保存为：{save_path}")
 
 def train_model():
 
@@ -15,7 +50,6 @@ def train_model():
     train_data, test_data, patients = inputall.getInput(cancer)
     gene_num = inputall.getGene(patients)
     net, gene_final, gene_name = inputall.getNetwork(gene_num)
-
     weights = inputall.getWeight(gene_name)
     # 🩹 补丁 1：填补缺失的基因权重，防止 KeyError
     for g in gene_name:
@@ -47,8 +81,9 @@ def train_model():
 
     feature = RL.get_feature(net, [], weights, gene_name, gene_final)
 
-    MAX_EPISODES = 1000  # 训练轮数
+    MAX_EPISODES = 100  # 训练轮数
     print(f"🔥 开始模型训练，目标 {MAX_EPISODES} 轮...")
+    episode_rewards_history = []
 
     for episode in range(MAX_EPISODES):
         # 初始化状态遮罩
@@ -113,11 +148,15 @@ def train_model():
             if done == 1:
                 # 🌟 打印咱们自己记录的总分，不管 DQN 怎么清零，咱们的分数都不会丢！
                 print(f"🏁 第 {episode + 1}/{MAX_EPISODES} 轮结束！累计获得奖励: {episode_reward:.2f}")
+                episode_rewards_history.append(episode_reward)
                 break
 
     print("💾 训练完成！正在保存模型权重...")
     RL.save("../data", "ccRCC_retrain")
     print("🎉 恭喜！模型已成功保存为 agent_ccRCC_retrain.th！")
+    plot_training_results(episode_rewards_history, RL.cost_his)
+
+
 
 
 if __name__ == "__main__":
