@@ -24,13 +24,13 @@ class DeepQNetwork:
             weights,
             score_alpha,
             pat_num=0,
-            learning_rate=0.001,
+            learning_rate=0.0001,
             reward_decay=0.95,
             e_greedy=0.95,
             replace_target_iter=100,
             memory_size=500,
             batch_size=128,
-            e_greedy_increment=-0.001,
+            e_greedy_increment=-0.000002,
             output_graph=False,
     ):
         self.net_ori = copy.deepcopy(net_ori)
@@ -47,12 +47,12 @@ class DeepQNetwork:
         self.embedding_size = embedding_size
         self.lr = learning_rate
         self.gamma = reward_decay
-        self.epsilon_max = 0
+        self.epsilon_min = 0.05
         self.replace_target_iter = replace_target_iter
         self.memory_size = memory_size
         self.batch_size = batch_size
         self.epsilon_increment = e_greedy_increment
-        self.epsilon = 0.95
+        self.epsilon = 1.0
         self.score_be = 0
         self.score_sta = 0
         self.score_pat = 0
@@ -368,7 +368,7 @@ class DeepQNetwork:
         self.Q.optimizer.step()
         self.cost_his.append(loss.item())
         # 更新 epsilon（探索概率衰减：越往后，探索越少，利用越多）
-        self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon > self.epsilon_max else self.epsilon_max
+        self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon > self.epsilon_min else self.epsilon_min
         self.learn_step_counter += 1
         # ========== 软更新目标 Q 网络 θ⁻ ==========
         # 每次 learn() 都让目标网络向当前 Q 网络平滑逼近一点点

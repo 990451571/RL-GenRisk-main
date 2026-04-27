@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from DQN import DeepQNetwork
 
 
-def plot_training_results(rewards, losses, save_path="../data/RL_GenRisk_Training_Curves.png"):
+def plot_training_results(rewards, losses, save_path="../data/RL_GenRisk_Training_Curves2.png"):
     """
     一键生成并保存双拼训练曲线图（奖励值 & 损失值）
     """
@@ -81,7 +81,7 @@ def train_model():
 
     feature = RL.get_feature(net, [], weights, gene_name, gene_final)
 
-    MAX_EPISODES = 100  # 训练轮数
+    MAX_EPISODES = 500  # 训练轮数
     print(f"🔥 开始模型训练，目标 {MAX_EPISODES} 轮...")
     episode_rewards_history = []
 
