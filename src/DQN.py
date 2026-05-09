@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import torch
 from sklearn import preprocessing
-from replay_buffer import ReplayBuffer
+from replay_buffer import PrioritizedReplayBuffer
 from qfunction import Q_Fun
 
 mpl.use('Agg')
@@ -47,7 +47,7 @@ class DeepQNetwork:
         self.embedding_size = embedding_size
         self.lr = learning_rate
         self.gamma = reward_decay
-        self.epsilon_min = 0.05
+        self.epsilon_min = 0.01
         self.replace_target_iter = replace_target_iter
         self.memory_size = memory_size
         self.batch_size = batch_size
@@ -73,10 +73,17 @@ class DeepQNetwork:
         self.cost_his_emb = []
         self.cost_his_q = []
         T = 3
-        ALPHA = 0.001
+        ALPHA = 0.25
         self.Q = Q_Fun(self.embedding_size, self.embedding_size, T, ALPHA, self.net_ori)
         self.Q_target = Q_Fun(self.embedding_size, self.embedding_size, T, ALPHA, self.net_ori)
-        self.memory = ReplayBuffer(self.memory_size, self.n_actions)
+        self.memory = PrioritizedReplayBuffer(
+            self.memory_size,
+            self.n_actions,
+            alpha=0.6,
+            beta_start=0.1,
+            beta_frames=2000000,
+            eps=1e-5,
+        )
         self.score_alpha = score_alpha
         self.pat_num = pat_num
         self.embedding = None
@@ -313,7 +320,7 @@ class DeepQNetwork:
     def learn(self):
         # ========== 从经验回放池采样一批经验 ==========
         # 对应：(S, A, R, S', 动作掩码)
-        state, action, reward_sum, action_index, sel_action = self.memory.sample_buffer(self.batch_size)
+        state, action, reward_sum, action_index, sel_action, sample_indices, is_weights = self.memory.sample_buffer(self.batch_size)
         # 清空 Q 网络的梯度（上一步的梯度残留要清掉）
         self.Q.optimizer.zero_grad()
         mu = None
@@ -328,9 +335,11 @@ class DeepQNetwork:
         action = torch.LongTensor(action).view(-1, 1).to(self.Q.device)
         reward_sum = torch.tensor(reward_sum, dtype=torch.float32).view(-1, 1).to(self.Q.device)
         new_state = state.clone()
+
         action_index = torch.LongTensor(action_index).to(self.Q.device)
         action_index_new = torch.LongTensor(action_index_new).to(self.Q.device)
         sel_action = torch.LongTensor(sel_action).to(self.Q.device)
+        is_weights = torch.tensor(is_weights, dtype=torch.float32).to(self.Q.device)
 
                 # ========== 计算目标 Q 值 y_t ==========
         # ========== 计算目标 Q 值 y_t (Double DQN 升级版) ==========
@@ -341,7 +350,7 @@ class DeepQNetwork:
             # ⚠️ 极其关键的“掩码(Masking)”操作：
             # action_index_new 中为 0 代表该基因已经入选，不能再挑了。
             # 我们把这些不可选基因的 Q 值强行变成 -1e9（极小值），防止 argmax 选错。
-            mask = (action_index_new == 0)
+            mask = action_index_new == 0
             next_q_values_online = next_q_values_online.masked_fill(mask, -1e9)
 
             # 玩家做出决定：找出最高分的动作索引，对应公式里的 argmax a'
@@ -349,23 +358,37 @@ class DeepQNetwork:
 
             # 第二步：目标网络 (self.Q_target) 当“裁判”，对 S' 进行独立打分
             next_q_values_target, _ = self.Q_target(mu, new_state, action_index_new, batch_flag=True)
+            next_q_target = next_q_values_target.gather(1, best_next_actions)
 
-            # 裁判公布成绩：从裁判的打分表里，提取出玩家刚刚挑中的那个基因的分数
-            temp = next_q_values_target.gather(1, best_next_actions)
+            y_target = reward_sum + self.gamma * next_q_target
 
-        # 对应 DDQN 论文公式：y_t = r + γ * Q_target(s', argmax Q_online(s',a'))
-        y_target = torch.add(reward_sum, temp * self.gamma).detach()
+
         # ========== 计算当前 Q 值 Q(s,a;θ) ==========
-        y_pred, _ = self.Q(mu, state, action_index, batch_flag=True)# 用 Q 网络计算当前状态 S 的所有 Q 值
-        y_pred = y_pred.gather(1, action)# 只取「实际执行的动作 A」对应的 Q 值
+        y_pred_all, _ = self.Q(
+            mu,
+            state,
+            action_index,
+            batch_flag=True
+        )# 用 Q 网络计算当前状态 S 的所有 Q 值
+        y_pred = y_pred_all.gather(1, action)# 只取「实际执行的动作 A」对应的 Q 值
         # ========== 计算损失函数 Loss  ==========
         # 对应论文公式：L = (y_t - Q(s,a;θ))²
-        loss = torch.mean(torch.pow(y_target - y_pred, 2))
+        td_errors = y_target - y_pred
+
+        elementwise_loss = torch.nn.functional.smooth_l1_loss(
+            y_pred,
+            y_target,
+            reduction="none"
+        )
+
+        loss = torch.mean(is_weights * elementwise_loss)
         # ==========  反向传播更新 Q 网络权重 ==========
         loss.backward()
         # 🛡️ 新增：梯度裁剪防弹衣！强行把超过 1.0 的极端梯度削平，防止网络崩溃
         torch.nn.utils.clip_grad_norm_(self.Q.parameters(), max_norm=1.0)
         self.Q.optimizer.step()
+        td_errors_np = td_errors.detach().abs().cpu().numpy()
+        self.memory.update_priorities(sample_indices, td_errors_np)
         self.cost_his.append(loss.item())
         # 更新 epsilon（探索概率衰减：越往后，探索越少，利用越多）
         self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon > self.epsilon_min else self.epsilon_min

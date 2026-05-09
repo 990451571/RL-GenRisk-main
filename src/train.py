@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from DQN import DeepQNetwork
 
 
-def plot_training_results(rewards, losses, save_path="../data/RL_GenRisk_Training_Curves2.png"):
+def plot_training_results(rewards, losses, save_path="../data/RL_GenRisk_Training_Curves_PER.png"):
     """
     一键生成并保存双拼训练曲线图（奖励值 & 损失值）
     """
@@ -152,7 +152,7 @@ def train_model():
                 break
 
     print("💾 训练完成！正在保存模型权重...")
-    RL.save("../data", "ccRCC_retrain")
+    RL.save("../data", "ccRCC_train_PER")
     print("🎉 恭喜！模型已成功保存为 agent_ccRCC_retrain.th！")
     plot_training_results(episode_rewards_history, RL.cost_his)
 
