@@ -233,7 +233,7 @@ def run(gene_final, score_alpha):
     log_path = "log"
     os.makedirs(log_path, exist_ok=True)
     f2 = open(log_path + "/log_" + cancer + ".txt", "w")
-    save_path = "../data/agent_ccRCC.th"
+    save_path = "../data/agent_ccRCC_train_PER.th"
 
     print("🧠 正在唤醒模型大脑...")
     RL.load(save_path)
@@ -251,7 +251,7 @@ def run(gene_final, score_alpha):
     print("📊 AI 正在给 9000 多个基因进行地毯式打分，请稍候...")
     action_sel = [i for i in range(RL.n_actions)]
     action_index = RL.choose_action(feature, action_sel, RL.actions_index)
-    f = open("Ranking_List_author.txt", "w")
+    f = open("Ranking_List_PER.txt", "w")
     result = []
     for i in range(len(action_index)):
         result.append([gene_name[i], action_index[i]])
@@ -287,7 +287,7 @@ def run(gene_final, score_alpha):
         print(out + "\t" + str(dict_average_STPL[x]) + "\t" + str(dict_average_STPL_FDR_p[x]) + "\t" + str(
             dict_average_CS[x]) + "\t" + str(dict_average_CS_FDR_p[x]), file=f)
     f.close()
-    print("🎉 恭喜！最终致癌潜力排名清单 Ranking_List.txt 已生成！")
+    print("🎉 恭喜！最终致癌潜力排名清单 Ranking_List_PER.txt 已生成！")
     exit()
 
     return gene_sort

@@ -6,10 +6,10 @@ class PrioritizedReplayBuffer:
         self,
         max_size,
         n_actions,
-        alpha=0.6,
-        beta_start=0.4,
-        beta_frames=500000,
-        eps=1e-6,
+        alpha=0.2,
+        beta_start=0.1,
+        beta_frames=2000000,
+        eps=1e-5,
     ):
         self.mem_size = max_size
         self.mem_cntr = 0
@@ -61,7 +61,12 @@ class PrioritizedReplayBuffer:
             probs = np.ones(current_size, dtype=np.float32) / current_size
         else:
             probs = priorities ** self.alpha
-            probs = probs / probs.sum()
+            probs_sum = probs.sum()
+
+            if probs_sum <= 0 or np.isnan(probs_sum):
+                probs = np.ones(current_size, dtype=np.float32) / current_size
+            else:
+                probs = probs / probs_sum
 
         replace = current_size < batch_size
         sample_index = np.random.choice(
@@ -88,8 +93,9 @@ class PrioritizedReplayBuffer:
 
     def update_priorities(self, indices, td_errors):
         td_errors = np.abs(td_errors).reshape(-1)
+
         for idx, err in zip(indices, td_errors):
-            priority = np.clip(err + self.eps, 0.0, 5.0)
+            priority = np.clip(err + self.eps, 1e-5, 5.0)
             self.priorities[idx] = priority
 
     def clear(self):

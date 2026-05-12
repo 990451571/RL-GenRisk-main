@@ -42,6 +42,7 @@ class Q_Fun(nn.Module):
         self.lin6 = Linear(hid_dim, hid_dim) # 全局状态特征映射
         self.lin7 = Linear(hid_dim, hid_dim)
         self.lin8 = Linear(hid_dim, 1) # 最终输出：1维Q值
+        self.dropout = nn.Dropout(p=0.2)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.net_old = torch.tensor(change(net_old)).long().to(self.device)
         self.net_old2 = torch.tensor(net_old).long().to(self.device)
@@ -54,12 +55,14 @@ class Q_Fun(nn.Module):
         if mu is None:
             x_in = x.clone()
             x_1 = self.lin1(x)
-            self.dropout = nn.Dropout(p=0.5, inplace=False)
+
             x_2 = self.conv1(x_1, self.net_old)
-            x_2 = x_2.relu()
-            self.dropout = nn.Dropout(p=0.5, inplace=False)
+            x_2 = F.relu(x_2)
+            x_2 = self.dropout(x_2)
+
             x_3 = self.conv2(x_2, self.net_old)
-            x_3 = x_3.relu()
+            x_3 = F.relu(x_3)
+            x_3 = self.dropout(x_3)
             nodes_vec = self.lin2(torch.cat([x_1, x_2, x_3], dim=-1))
         else:
             nodes_vec = mu

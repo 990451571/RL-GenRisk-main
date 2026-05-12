@@ -28,7 +28,7 @@ class DeepQNetwork:
             reward_decay=0.95,
             e_greedy=0.95,
             replace_target_iter=100,
-            memory_size=500,
+            memory_size=50000,
             batch_size=128,
             e_greedy_increment=-0.000002,
             output_graph=False,
@@ -73,17 +73,18 @@ class DeepQNetwork:
         self.cost_his_emb = []
         self.cost_his_q = []
         T = 3
-        ALPHA = 0.25
+        ALPHA = 0.0001
         self.Q = Q_Fun(self.embedding_size, self.embedding_size, T, ALPHA, self.net_ori)
         self.Q_target = Q_Fun(self.embedding_size, self.embedding_size, T, ALPHA, self.net_ori)
         self.memory = PrioritizedReplayBuffer(
             self.memory_size,
             self.n_actions,
-            alpha=0.6,
+            alpha=0.2,
             beta_start=0.1,
             beta_frames=2000000,
             eps=1e-5,
         )
+
         self.score_alpha = score_alpha
         self.pat_num = pat_num
         self.embedding = None
@@ -318,9 +319,12 @@ class DeepQNetwork:
         self.memory.clear()
 
     def learn(self):
+        if len(self.memory) < self.batch_size:
+            return
         # ========== 从经验回放池采样一批经验 ==========
         # 对应：(S, A, R, S', 动作掩码)
-        state, action, reward_sum, action_index, sel_action, sample_indices, is_weights = self.memory.sample_buffer(self.batch_size)
+        state, action, reward_sum, action_index, sel_action, sample_indices, is_weights = \
+            self.memory.sample_buffer(self.batch_size)
         # 清空 Q 网络的梯度（上一步的梯度残留要清掉）
         self.Q.optimizer.zero_grad()
         mu = None
@@ -334,6 +338,7 @@ class DeepQNetwork:
         state = torch.tensor(state, dtype=torch.float32).to(self.Q.device)
         action = torch.LongTensor(action).view(-1, 1).to(self.Q.device)
         reward_sum = torch.tensor(reward_sum, dtype=torch.float32).view(-1, 1).to(self.Q.device)
+        reward_sum = reward_sum / 10.0
         new_state = state.clone()
 
         action_index = torch.LongTensor(action_index).to(self.Q.device)
@@ -395,10 +400,11 @@ class DeepQNetwork:
         self.learn_step_counter += 1
         # ========== 软更新目标 Q 网络 θ⁻ ==========
         # 每次 learn() 都让目标网络向当前 Q 网络平滑逼近一点点
-        tau = 0.005  # 平滑系数 (通常取 0.001 到 0.005 之间，你也可以把它写进 __init__ 中作为 self.tau)
+        tau = self.tau # 平滑系数 (通常取 0.001 到 0.005 之间，你也可以把它写进 __init__ 中作为 self.tau)
         for target_param, local_param in zip(self.Q_target.parameters(), self.Q.parameters()):
-            # 对应公式：θ' = τ*θ + (1-τ)*θ'
-            target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
+            target_param.data.copy_(
+                self.tau * local_param.data + (1.0 - self.tau) * target_param.data
+            )
 
 
     def save(self, path, cancer):
