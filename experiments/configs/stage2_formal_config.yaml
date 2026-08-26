@@ -1,0 +1,26 @@
+# formal_config.yaml
+PRIMARY_ENDPOINT: "Validation NDCG@150"
+feature_mode: "hybrid6_raw"
+message_network_conditions: ["PPI", "GRN", "PPI_GRN"]
+seeds: [42, 43, 44, 45, 46]
+max_episodes: 15
+max_steps: 160
+selection_budget: 150
+batch_size: 128
+warmup_steps: 128
+buffer_size: 2048
+learning_rate: 0.0001
+gamma: 0.95
+tau: 0.001
+epsilon_start: 1.0
+epsilon_end: 0.15
+epsilon_decay: 2000.0
+PER_alpha: 0.2
+PER_beta_start: 0.1
+PER_beta_frames: 2000000
+PER_eps: 1e-05
+target_update: "soft update every learn step, tau=0.001"
+checkpoint_interval: "every episode"
+checkpoint_selection_metric: "Validation NDCG@150"
+historical_test_policy: "not read, not evaluated, not used for model/network/checkpoint selection"
+low_frequency_dev_eval: "DEFERRED"

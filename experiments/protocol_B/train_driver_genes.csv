@@ -1,0 +1,17 @@
+Gene,Split,Source,In_PPI
+ARID1A,train,KnownDriver∩PPI,True
+ATM,train,KnownDriver∩PPI,True
+BAP1,train,KnownDriver∩PPI,True
+EPAS1,train,KnownDriver∩PPI,True
+KIF1B,train,KnownDriver∩PPI,True
+MTOR,train,KnownDriver∩PPI,True
+NF2,train,KnownDriver∩PPI,True
+PBRM1,train,KnownDriver∩PPI,True
+PIK3CA,train,KnownDriver∩PPI,True
+PTEN,train,KnownDriver∩PPI,True
+SETD2,train,KnownDriver∩PPI,True
+SMARCA4,train,KnownDriver∩PPI,True
+TP53,train,KnownDriver∩PPI,True
+TSC1,train,KnownDriver∩PPI,True
+TSC2,train,KnownDriver∩PPI,True
+VHL,train,KnownDriver∩PPI,True

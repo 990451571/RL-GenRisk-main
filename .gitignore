@@ -20,3 +20,21 @@ ENV/
 # 其他
 .DS_Store
 *.log
+
+# Local machine configuration
+config/local_paths.yaml
+
+# Caches and local runtime state
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Experiment outputs and smoke runs
+outputs/
+**/smoke_codex_*/
+**/smoke_*_ranking.txt
+
+# Large model/checkpoint artifacts generated locally
+*.pt
+*.pth
+*.th

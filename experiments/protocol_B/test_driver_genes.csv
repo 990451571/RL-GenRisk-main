@@ -1,0 +1,19 @@
+Gene,Split,Source,In_PPI
+AHNAK,test,NCG-only minus Train,True
+AKAP13,test,NCG-only minus Train,True
+ANPEP,test,NCG-only minus Train,True
+CARD11,test,NCG-only minus Train,True
+CCNB2,test,NCG-only minus Train,True
+COL11A1,test,NCG-only minus Train,True
+CUL7,test,NCG-only minus Train,True
+KDM6A,test,NCG-only minus Train,True
+MSR1,test,NCG-only minus Train,True
+NFE2L2,test,NCG-only minus Train,True
+NPNT,test,NCG-only minus Train,True
+RHEB,test,NCG-only minus Train,True
+RYR1,test,NCG-only minus Train,True
+SHANK1,test,NCG-only minus Train,True
+SPTBN4,test,NCG-only minus Train,True
+SYNE2,test,NCG-only minus Train,True
+TXNIP,test,NCG-only minus Train,True
+ZNF804A,test,NCG-only minus Train,True

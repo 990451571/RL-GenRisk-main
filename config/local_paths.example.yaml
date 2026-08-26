@@ -1,0 +1,8 @@
+# Copy this file to config/local_paths.yaml for machine-specific paths.
+# Keep local_paths.yaml out of Git.
+
+project_root: /mnt/e/Projects/RL-GenRisk-main
+data_root: data
+codex_output_root: /mnt/e/codex_file
+train_label_path: experiments/protocol_B/train_driver_genes.csv
+val_label_path: experiments/protocol_B/validation_driver_genes.csv

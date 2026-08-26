@@ -1,0 +1,27 @@
+# formal_config.yaml
+PRIMARY_ENDPOINT: "Validation NDCG@150"
+STAGE4_BACKBONE: "Stage2_SimpleUnion"
+feature_mode: "hybrid6_raw"
+message_graph: "PPI_GRN SimpleUnion"
+policies: ["Recovery", "Discovery", "Robustness"]
+seeds: [42, 43, 44, 45, 46]
+max_episodes: 15
+max_steps: 160
+selection_budget: 150
+batch_size: 128
+warmup_steps: 128
+buffer_size: 2048
+learning_rate: 0.0001
+gamma: 0.95
+tau: 0.001
+epsilon_start: 1.0
+epsilon_end: 0.15
+epsilon_decay: 2000.0
+PER_alpha: 0.2
+PER_beta_start: 0.1
+PER_beta_frames: 2000000
+PER_eps: 1e-05
+checkpoint_selection_metric: "Validation NDCG@150"
+historical_test_policy: "not read, not evaluated, not used"
+validation_reward_policy: "Validation labels not used in reward"
+MORL_STARTED: NO

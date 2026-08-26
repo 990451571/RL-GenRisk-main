@@ -1,0 +1,26 @@
+Gene,Split,Source,In_PPI
+AKAP9,validation,IntOGen-only minus Train,True
+ARHGAP35,validation,IntOGen-only minus Train,True
+ARHGEF10L,validation,IntOGen-only minus Train,True
+ARID1B,validation,IntOGen-only minus Train,True
+ATG7,validation,IntOGen-only minus Train,True
+CDK12,validation,IntOGen-only minus Train,True
+CHD4,validation,IntOGen-only minus Train,True
+CLTC,validation,IntOGen-only minus Train,True
+CREBBP,validation,IntOGen-only minus Train,True
+CUX1,validation,IntOGen-only minus Train,True
+ERBB4,validation,IntOGen-only minus Train,True
+FAT1,validation,IntOGen-only minus Train,True
+FAT4,validation,IntOGen-only minus Train,True
+FLT4,validation,IntOGen-only minus Train,True
+MAP3K1,validation,IntOGen-only minus Train,True
+MET,validation,IntOGen-only minus Train,True
+NF1,validation,IntOGen-only minus Train,True
+PTPRK,validation,IntOGen-only minus Train,True
+RANBP2,validation,IntOGen-only minus Train,True
+RAP1GDS1,validation,IntOGen-only minus Train,True
+SETBP1,validation,IntOGen-only minus Train,True
+SF3B1,validation,IntOGen-only minus Train,True
+SPEN,validation,IntOGen-only minus Train,True
+STAG2,validation,IntOGen-only minus Train,True
+TGFBR2,validation,IntOGen-only minus Train,True

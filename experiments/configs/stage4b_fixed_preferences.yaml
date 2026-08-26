@@ -1,0 +1,16 @@
+preferences:
+  Recovery:
+    w_relevance: 0.7
+    w_discovery: 0.15
+    w_robustness: 0.15
+    sum: 1.0
+  Discovery:
+    w_relevance: 0.2
+    w_discovery: 0.65
+    w_robustness: 0.15
+    sum: 1.0
+  Robustness:
+    w_relevance: 0.2
+    w_discovery: 0.2
+    w_robustness: 0.6
+    sum: 1.0

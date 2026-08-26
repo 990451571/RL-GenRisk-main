@@ -1,0 +1,3 @@
+Gene,Split,Source,In_PPI
+LRP1B,sensitivity_shared_external,IntOGen∩NCG shared external genes not in Train,True
+TRRAP,sensitivity_shared_external,IntOGen∩NCG shared external genes not in Train,True

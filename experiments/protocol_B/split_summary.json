@@ -1,0 +1,28 @@
+{
+  "protocol": "protocol_B",
+  "train_count": 16,
+  "validation_count": 25,
+  "test_count": 18,
+  "strict_train_validation_test_disjoint": true,
+  "train_gene_sha256": "3f0e8f457b5b9987b1e1a461067a6f94f3d814d34b3463ed14a12f0b33953861",
+  "validation_gene_sha256": "366fc5723ed7e13719a5079b42df2e15681a211425bb9954184040614e3a7022",
+  "test_gene_sha256": "7d545056a9a9d57b76705f978a822bd39fa0ad75f71c2ec235b014b895a12b05",
+  "file_sha256": {
+    "train_driver_genes.csv": "1ba7cea4675889116600cb307711a0e08ca3b2906a46e6451851223609b245bd",
+    "validation_driver_genes.csv": "f0674346ccbece8d1b5d8db8eaa4eb9ebc4ec494a2fba5c021e313996162145a",
+    "test_driver_genes.csv": "5b95321e7bb13e914f093d749768dff9c6ff676952232db53df0de782d6cdf67",
+    "sensitivity_shared_external.csv": "ff201153837f350eec2c12b7ba13d7912f19484821654c6564787a1891b9db6b"
+  },
+  "sources": {
+    "train": "KnownDriver∩PPI",
+    "validation": "IntOGen-only minus Train",
+    "test": "NCG-only minus Train",
+    "sensitivity": "IntOGen∩NCG shared external genes not in Train"
+  },
+  "notes": [
+    "Shared external IntOGen/NCG labels are excluded from primary Validation/Test.",
+    "Shared external labels are saved as Sensitivity_shared_external."
+  ],
+  "sensitivity_shared_external_count": 2,
+  "sensitivity_gene_sha256": "1ae40f5b3d67a7c63b17e6afb7b19da3ccdf81efb547db1e628d28e27f3c01a6"
+}
