@@ -1,0 +1,1 @@
+wsl bash -lc "source ~/miniconda3/etc/profile.d/conda.sh && conda activate rl_genrisk && cd '/mnt/e/Projects/RL-GenRisk-main/src' && python -m py_compile inputall.py train.py identify.py"
