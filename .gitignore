@@ -31,6 +31,12 @@ config/local_paths.yaml
 
 # Experiment outputs and smoke runs
 outputs/
+backup/
+data/raw/
+data/processed/
+data/*.png
+src/log/
+src/Ranking_List*.txt
 **/smoke_codex_*/
 **/smoke_*_ranking.txt
 
