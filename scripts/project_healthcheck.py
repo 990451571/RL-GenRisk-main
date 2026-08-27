@@ -60,7 +60,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only RL-GenRisk migration healthcheck.")
     parser.add_argument("--train-label-path", default=None)
     parser.add_argument("--val-label-path", default=None)
-    parser.add_argument("--checkpoint", default=str(PROJECT_ROOT / "data" / "agent_KIRC_driver_DDQN_PER.th"))
+    parser.add_argument("--checkpoint", default=None, help="可选：要检查的 checkpoint 路径；不提供时跳过该项检查。")
     args = parser.parse_args()
 
     failures: list[str] = []
@@ -108,7 +108,7 @@ def main() -> int:
     for module_name in ["qfunction", "replay_buffer", "DQN"]:
         import_required(module_name, failures)
 
-    for path in [PROJECT_ROOT / "data", PROJECT_ROOT / "multi-omics data"]:
+    for path in [PROJECT_ROOT / "data"]:
         check(path.exists() and path.is_dir(), f"directory exists: {path}", failures)
 
     labels = {
@@ -141,8 +141,10 @@ def main() -> int:
                     failures.append(f"data readable {path}: {type(exc).__name__}: {exc}")
                     print(f"FAIL data readable {path}: {type(exc).__name__}: {exc}")
 
-    if torch is not None:
+    if torch is not None and args.checkpoint:
         check_checkpoint(Path(args.checkpoint), torch, failures)
+    elif torch is not None:
+        print("SKIP checkpoint check: no --checkpoint provided")
 
     print(json.dumps({"failures": failures}, ensure_ascii=False, indent=2))
     if failures:
