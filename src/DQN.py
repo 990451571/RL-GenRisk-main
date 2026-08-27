@@ -1,10 +1,7 @@
 import numpy as np
 import pandas as pd
 import copy
-import matplotlib.pyplot as plt
-import matplotlib as mpl
 import torch
-from sklearn import preprocessing
 from replay_buffer import PrioritizedReplayBuffer
 from qfunction import Q_Fun
 from mutation_frequency import (
@@ -12,8 +9,6 @@ from mutation_frequency import (
     classify_mutation_frequency,
     mutation_frequency_pct,
 )
-
-mpl.use('Agg')
 
 
 class DeepQNetwork:
@@ -32,13 +27,9 @@ class DeepQNetwork:
             pat_num=0,
             learning_rate=0.0001,
             reward_decay=0.95,
-            e_greedy=0.95,
-            replace_target_iter=100,
             memory_size=50000,
             batch_size=128,
             selection_budget=999,
-            e_greedy_increment=-0.000002,
-            output_graph=False,
             gradient_clip=1.0,
             reward_mode="legacy",
             reward_weights=None,
@@ -49,8 +40,6 @@ class DeepQNetwork:
         self.fea_ori = copy.deepcopy(fea_ori)
         self.train_patient_data = train_patient_data
         self.test_patient_data = test_patient_data
-        self.train_cover = []
-        self.test_cover = []
         self.weights = weights
         # Reward driver labels. gene_sta is kept as a backwards-compatible alias.
         self.train_driver_set = set(train_driver_set if train_driver_set is not None else gene_sta)
@@ -63,13 +52,11 @@ class DeepQNetwork:
         self.lr = learning_rate
         self.gamma = reward_decay
         self.epsilon_min = 0.01
-        self.replace_target_iter = replace_target_iter
         self.memory_size = memory_size
         self.batch_size = batch_size
         self.selection_budget = int(selection_budget)
         if self.selection_budget <= 0:
             raise ValueError(f"selection_budget must be positive, got {selection_budget!r}")
-        self.epsilon_increment = e_greedy_increment
         self.epsilon = 1.0
         self.gradient_clip = float(gradient_clip)
         if self.gradient_clip <= 0:
@@ -78,12 +65,10 @@ class DeepQNetwork:
         self.score_sta = 0
         self.score_pat = 0
         self.learn_step_counter = 0
-        self.a_ori = np.zeros((1, self.embedding_size))
 
         self.memory_counter = 0
         self.tau = 0.001
 
-        self.gene_ori = []
         self.reward_all = 0
         self.reward_list = []
         self.last_reward_components = {}
@@ -110,13 +95,6 @@ class DeepQNetwork:
             raise ValueError(
                 f"{self.reward_mode} requires a frozen low-frequency evidence table."
             )
-        self.train_sta = 0
-        self.train_before = 0
-
-        self.n_step = 4
-        self.cost_his = []
-        self.cost_his_emb = []
-        self.cost_his_q = []
         T = 3
         ALPHA = 0.0001
         self.Q = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, self.net_ori)
@@ -330,135 +308,6 @@ class DeepQNetwork:
             raise FloatingPointError(f"Non-finite reward components for {selected_gene}: {components}")
         return components
 
-    def laplacian(self, net):
-        lap = copy.deepcopy(net)
-        lap = lap * (-1)
-        for i in range(net.shape[0]):
-            lap[i][i] = np.sum(net[i])
-        return lap
-
-    def getBatch(self):
-        selete = [x for x in range(self.memory_size - self.n_step) if self.memory_temp[x] == 1]
-        if self.memory_counter > self.memory_size:
-            sample_index = np.random.choice(selete, size=self.batch_size)
-        else:
-            sample_index = np.random.choice(selete, size=self.batch_size)
-        batch_r, q_next, batch_s_ = np.zeros((self.batch_size, 1)), np.zeros((self.batch_size, 1)), np.zeros(
-            (self.batch_size, self.embedding_size))
-        batch_a = self.memory_ar[sample_index, :self.embedding_size]
-        batch_s = self.memory_s[sample_index, :]
-        batch_fea = self.memory_fea[sample_index, :, :]
-        batch_net = self.memory_net[sample_index, :, :]
-        betch_lap = self.memory_lap[sample_index, :, :]
-        for i in range(self.batch_size):
-            index = sample_index[i]
-            reward = 0
-            for j in range(self.n_step):
-                reward = reward + self.memory_ar[index + self.n_step, self.embedding_size]
-            batch_r[i, :] = reward
-            action_list = self.memory_actions[index + self.n_step, :]
-            network = self.memory_net[index + self.n_step, :, :]
-            feature = self.memory_fea[index + self.n_step, :, :]
-            s_ = self.memory_s_[index + self.n_step, :]
-            q_next[i, :] = self.get_train_Q(action_list, network, feature, s_)
-            batch_s_[i, :] = self.memory_s_[index + self.n_step, :]
-        return batch_fea, batch_net, betch_lap, batch_s, batch_a, batch_r, q_next, batch_s_
-
-    def store_transition(self, s, a, r, s_, network_new1, feature_new1, lap):
-        if not hasattr(self, 'memory_counter'):
-            self.memory_counter = 0
-        transition = np.hstack(([a, r]))
-
-        index = self.memory_counter % self.memory_size
-        self.memory_ar[index, :] = transition
-        self.memory_s[index, :] = s
-        self.memory_s_[index, :] = s_
-        self.memory_fea[index, :] = feature_new1
-        self.memory_net[index, :] = network_new1
-        self.memory_lap[index, :] = lap
-        self.memory_actions[index, :] = self.actions_index[:]
-        if len(self.actions) >= 150 - self.n_step:
-            self.memory_temp[index] = 0
-        else:
-            self.memory_temp[index] = 1
-        self.memory_counter += 1
-
-    def getState(self, feature_new, network_new):
-        # 1. 执行TensorFlow计算图，获取所有节点的嵌入向量
-        embedding = self.sess.run(self.emb_node,
-                                  feed_dict={self.feature_ori: feature_new,
-                                             self.net: network_new})
-        # 2. 对所有节点的嵌入向量按维度求和，聚合为全局状态
-        s = np.sum(embedding, axis=0, keepdims=True)
-        # 3. 返回图的全局状态向量
-        return s
-
-    def getAction(self, network_new, action_selold, action_index):
-        i = self.actions[-1]# 取最后一个被选中的节点（上一步的动作）
-        action_selold.remove(i) # 从可选列表中删掉它（选过的不能再选）
-        action_index[i] = 0# 标记这个节点：不可选
-        # 遍历图中所有节点j
-        for j in range(network_new.shape[0]):
-            # 节点i和j是邻居、j不在可选列表里、j没被选过（不在历史动作里）
-            if self.net_ori[i][j] > 0 and j not in action_selold and j not in self.actions:
-                action_selold.append(j)# 加入可选列表
-                action_index[j] = 1# 标记为可选
-
-        if len(action_selold) == 0:# 如果可选列表空了
-            for i in self.gene_ori:
-            # 遍历所有原始节点
-                if i not in self.actions:
-                    action_selold.append(i)
-                    action_index[i] = 1
-        return action_selold, action_index
-
-    def get_train_Q(self, action_list, network, feature, s_):
-        nei_list = np.dot(action_list, self.net_ori)
-        node_emb_all = self.sess.run(self.emb_node, feed_dict={self.feature_ori: feature,
-                                                               self.net: network})
-        action_sel = []
-        for i in range(self.n_actions):
-            if nei_list[i] > 0 and action_list[i] == 0:
-                action_sel.append(i)
-        action_emb = np.zeros((len(action_sel), self.embedding_size))
-        for i in range(len(action_sel)):
-            index = action_sel[i]
-            action_emb[i, :] = node_emb_all[index, :]
-        s = np.expand_dims(s_, 0)
-        s_all = np.repeat(s, len(action_sel), axis=0)
-
-        actions_value = self.sess.run(self.q_target_, feed_dict={self.s_: s_all,
-                                                                 self.a_: action_emb})
-        actions_value = np.squeeze(actions_value)
-        qt = np.max(actions_value)
-        return qt
-
-    def choose_action(self, state, action_sel, action_index):
-        # 判断是否有可选动作，有则执行决策
-        if len(action_sel) > 0:
-            state = torch.tensor(state, dtype=torch.float32).to(self.Q.device)
-            action_index = torch.LongTensor(action_index).to(self.Q.device)
-            # 调用在线Q网络，计算所有可选动作的Q值
-            actions_value, self.embedding = self.Q(self.embedding, state, action_index)
-            actions_value = actions_value.detach().cpu().numpy()
-            # 返回所有可选动作的Q值评分
-            return actions_value
-        # 无可选动作时，返回0
-        return 0
-
-    def getQt(self, feature_new, network_new, s_):
-        all_embedding = self.getEmbedding(feature_new, network_new)
-        action_sel, action_emb = self.getAction(all_embedding, network_new)
-        qt = -100
-        if len(action_sel) != 0:
-            s = np.expand_dims(s_, 0)
-            s_all = np.repeat(s, len(action_sel), axis=0)
-            actions_value = self.sess.run(self.q_target_, feed_dict={self.s_: s_all,
-                                                                     self.a_: action_emb})
-            actions_value = np.squeeze(actions_value)
-            qt = np.max(actions_value)
-        return qt
-
     def get_reward(self, gene_num, gene_name):
         """
         计算当前已选择基因集合的三个累计指标：
@@ -506,42 +355,6 @@ class DeepQNetwork:
         patient_uncovered_score = (self.pat_num - len(set(patient_num))) / self.pat_num
 
         return weight_score, patient_uncovered_score, driver_hit_ratio
-
-    def getAcc(self, actions, patients, gene_name):
-        cover_num = 0
-        patients_num = len(patients.keys())
-        for patient in patients:
-            genes = patients[patient]
-            for j in actions:
-                if list(gene_name)[j] in genes:
-                    cover_num += 1
-                    break
-        return cover_num / patients_num
-
-    def Normalized_minmax(self, feature):
-        X_scaler = preprocessing.MinMaxScaler()
-        X_train = copy.deepcopy(feature)
-        for i in range(len(feature[0])):
-            X_train[:, [i]] = X_scaler.fit_transform(feature[:, [i]])
-        return X_train
-
-    def Normalized(self, feature):
-        X_scaler = preprocessing.StandardScaler()
-        X_train = X_scaler.fit_transform(feature)
-        return X_train
-
-    def get_feature(self, net, actions, weights, gene_name, gene_final):
-        nodes_size = net.shape[0]
-        feature = np.zeros((nodes_size, max(3, self.feature_dim)))
-        i = 0
-        for gene in list(gene_name):
-            feature[i][0] = np.sum(net[i])
-            feature[i][1] = weights[gene]
-            if gene in list(gene_final.keys()):
-                feature[i][2] = len(gene_final[gene])
-            i = i + 1
-        feature = self.Normalized_minmax(feature)
-        return feature
 
     def step(self, network, action, gene_num, gene_name, weights):
         """
@@ -677,12 +490,6 @@ class DeepQNetwork:
             self.embedding = None
             done = 1
 
-            train_acc = self.getAcc(actions, self.train_patient_data, gene_name)
-            self.train_cover.append(train_acc)
-
-            test_acc = self.getAcc(actions, self.test_patient_data, gene_name)
-            self.test_cover.append(test_acc)
-
             self.actions = []
             self.reward_list.append(reward)
             self.reward_all = 0
@@ -780,14 +587,11 @@ class DeepQNetwork:
         self.Q.optimizer.step()
         td_errors_np = td_errors.detach().abs().cpu().numpy()
         self.memory.update_priorities(sample_indices, td_errors_np)
-        self.cost_his.append(loss.item())
         self.last_learn_metrics = {
             "loss": float(loss.item()),
             "td_error_abs_mean": float(np.mean(td_errors_np)),
             "gradient_norm": float(gradient_norm.item() if hasattr(gradient_norm, "item") else gradient_norm),
         }
-        # 更新 epsilon（探索概率衰减：越往后，探索越少，利用越多）
-        self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon > self.epsilon_min else self.epsilon_min
         self.learn_step_counter += 1
         # ========== 软更新目标 Q 网络 θ⁻ ==========
         # 每次 learn() 都让目标网络向当前 Q 网络平滑逼近一点点
@@ -798,41 +602,3 @@ class DeepQNetwork:
             )
 
 
-    def save(self, path, cancer):
-        torch.save(self.Q.state_dict(), ("{}/agent_" + cancer + ".th").format(path))
-
-    def load(self, path):
-        checkpoint = torch.load(path, map_location=self.Q.device, weights_only=False)
-        if isinstance(checkpoint, dict) and "online_state_dict" in checkpoint:
-            self.Q.load_state_dict(checkpoint["online_state_dict"])
-            if "target_state_dict" in checkpoint:
-                self.Q_target.load_state_dict(checkpoint["target_state_dict"])
-            if "optimizer_state_dict" in checkpoint:
-                self.Q.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            return checkpoint.get("metadata", {})
-        self.Q.load_state_dict(checkpoint)
-        print("legacy checkpoint，缺少metadata，需要显式指定特征配置；")
-        return None
-
-    def save_checkpoint(self, path, metadata=None):
-        checkpoint = {
-            "checkpoint_format_version": 1,
-            "online_state_dict": self.Q.state_dict(),
-            "target_state_dict": self.Q_target.state_dict(),
-            "optimizer_state_dict": self.Q.optimizer.state_dict(),
-            "metadata": metadata or {},
-        }
-        torch.save(checkpoint, path)
-
-    def load_checkpoint(self, path):
-        metadata = self.load(path)
-        return metadata
-
-    def plot_cost(self, i):
-        pass
-
-    def plot_reward(self, i, score_PBRM1, score_MUC4, score_VHL):
-        pass
-
-    def plot_cost_finnal(self, i):
-        pass

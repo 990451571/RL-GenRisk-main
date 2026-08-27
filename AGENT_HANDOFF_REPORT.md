@@ -22,6 +22,26 @@
 - 修改前先读目标文件当前内容，确认是否已有用户/前序 agent 修改。
 - 大型运行产物、checkpoint、`outputs` 不应作为代码修改对象。
 
+2026-08-27 仓库清理记录（均已由用户确认执行）：
+
+- 删除了空占位文件 `src/build_multiomics_features.py`（0 字节，无引用）。
+- 删除了历史产物：`src/Ranking_List*.txt`、`src/*_top100.txt`、src 下分析 PDF、`src/agent_ccRCC*.th`、`data/agent_*.th`、`data/*.png` 训练曲线、`data/processed/ppi_overlap_check/`。
+- 删除了空文件 `src/test_KIRC.txt`、`src/log/log_KIRC.txt`、空目录 `multi-omics data/`、陈旧示例 `data/processed/multiomics_gene_features_example.csv`、所有 `__pycache__`。
+- 删除了 `outputs/` 中的 smoke run 输出和各正式 run 的逐集 ranking CSV；保留了 `outputs/hybrid6_raw_100ep_v1`、`outputs/hybrid6_raw_retrain_v1` 的 checkpoint/summary/best ranking 等关键证据。
+- 删除了遗留脚本：`run_in_ubuntu.ps1`、`src/check_kirc_sample_counts.py`、`src/inspect_raw_files.py`、`src/check_multiomics_ppi_overlap.py`（与 `inputall.py` 内同名函数重复）、`src/utils_draw.py`。
+- 保留了 `src/evaluate_frozen_test_cpu_deterministic.py`（CPU 确定性复现 harness，依赖 `E:\codex_file` 归档，非重复文件）。
+- 上述被删除的文件均为 git 跟踪内容，可通过 git 历史恢复；未提交清理提交。
+
+2026-08-27 死代码清理（已由用户确认）：
+
+- `src/DQN.py`：删除 12 个 TF 时代死方法（`getBatch`、`store_transition`、`getState`、`getAction`、`get_train_Q`、`choose_action`、`getQt`、`laplacian`、`get_feature`、`Normalized_minmax`、`Normalized`、`plot_*`），删除 `getAcc` 及 step() 内无人读取的 train/test 覆盖率块，删除 agent 级 `save/load/save_checkpoint/load_checkpoint`，删除死属性（`n_step`、`a_ori`、`gene_ori`、`train_sta`、`train_before`、`cost_his*`、`train_cover`、`test_cover`、`epsilon_increment`）与死参数（`e_greedy`、`replace_target_iter`、`output_graph`、`e_greedy_increment`），移除 matplotlib/sklearn 导入。
+- `src/train.py`：删除无调用的 `load_hybrid6_raw_features`（92 行，与 `load_node_features_by_mode` 重复）、`set_random_seed`、未使用常量 `FEATURE_COLUMNS`/`FEATURE_DIM`。
+- `src/inputall.py`：删除无调用的 `get_node_feature_report_by_mode`、`random_getGene`、`random_patient`。
+- `src/identify.py`：构造调用去掉 `e_greedy`/`replace_target_iter` 参数。
+- 注意：`experiments/scripts/stage4*.py` 中残留 `agent.epsilon_increment = 0.0` 一行（无害的实例属性赋值，因 learn() 已不再更新 epsilon；实验脚本为冻结历史，未改动）。
+- `experiments/scripts/stage4*.py` 以 `Stage4DeepQNetwork(DeepQNetwork)` 子类化，只覆写 `__init__/reward_config/step`，依赖基类 `get_reward/step/_compose_reward_components/learn/remember`——均已保留。
+- 三个 evaluate 脚本（frozen_test / cpu_deterministic / external_holdout）与 `aggregate_final_evaluation.py` 属于已冻结最终评估协议（SHA-256 记录于 `E:\codex_file\二阶段\02_final_evaluation\00_freeze_audit\evaluation_code_hashes.csv`），保持不动，禁止合并或修改。
+
 ## 2. 当前顶层目录
 
 `E:\Projects\RL-GenRisk-main` 当前主要内容：
@@ -76,7 +96,7 @@
 - `get_reward(...)`：legacy reward 的部分基础计算。
 - `step(...)`：执行选择基因后的环境状态更新、reward 计算、done 判断。
 - `learn()`：PER 采样、DDQN target、loss、反向传播、priority update、target soft update。
-- `save_checkpoint()` / `load_checkpoint()`：agent 级 checkpoint。
+- checkpoint 保存/读取统一由 `src/train.py` 模块级 `save_checkpoint()` / `load_checkpoint()` 承担（agent 级 checkpoint 方法已于 2026-08-27 删除）。
 
 DDQN 实现位置：
 
@@ -465,14 +485,14 @@ Protocol B 相关：
 - `src/train.py::checkpoint_payload`
 - `src/train.py::save_checkpoint`
 - `src/train.py::load_checkpoint`
-- `src/DQN.py::save_checkpoint`
-- `src/DQN.py::load_checkpoint`
 
 ## 11. 当前已知风险和待处理事项
 
-1. `src/build_multiomics_features.py` 当前长度为 0。
+1. 空占位文件 `src/build_multiomics_features.py` 已于 2026-08-27 删除。
 
-   如后续要重建多组学特征，不能依赖这个文件，需检查 `src/process_kirc_3omics.py`、`scripts/build_kirc_cnv_feature.py` 和历史脚本。
+   它曾是 0 字节占位文件且无任何代码引用。重建多组学特征的正规入口：
+   - 3 组学（Gene/Mutation/Expression/Methylation）：`src/process_kirc_3omics.py`
+   - CNV 与 4 组学（追加 CNV 列）：`scripts/build_kirc_cnv_feature.py`
 
 2. 主项目和历史 Stage 脚本属于不同层级。
 

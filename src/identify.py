@@ -613,8 +613,6 @@ if __name__ == "__main__":
                       weights=weights,
                       learning_rate=0.001,
                       reward_decay=0.9,
-                      e_greedy=0.95,
-                      replace_target_iter=100,
                       memory_size=3000,
                       score_alpha=score_alpha
                       )

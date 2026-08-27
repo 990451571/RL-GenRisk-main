@@ -70,8 +70,6 @@ FEATURE_COLUMNS_BY_MODE = {
 FEATURE_DIM_BY_MODE = {mode: len(columns) for mode, columns in FEATURE_COLUMNS_BY_MODE.items()}
 FOUR_OMICS_FEATURE_MODES = {"multiomics4_raw", "hybrid7_raw", "multiomics4_zscore", "hybrid7_zscore"}
 Z_SCORE_FEATURE_MODES = {"original3_zscore", "hybrid6_zscore", "multiomics4_zscore", "hybrid7_zscore"}
-FEATURE_COLUMNS = FEATURE_COLUMNS_BY_MODE[FEATURE_MODE]
-FEATURE_DIM = FEATURE_DIM_BY_MODE[FEATURE_MODE]
 K_VALUES = [20, 50, 100, 150]
 REWARD_MODES = [
     "legacy",
@@ -439,8 +437,6 @@ def set_seed(seed):
         logging.warning("无法启用严格确定性算法，将继续运行：%s", exc)
 
 
-def set_random_seed(seed):
-    set_seed(seed)
 
 
 def setup_logger(run_dir):
@@ -756,98 +752,6 @@ def load_node_features_by_mode(
     return node_features, cleaned_gene_name, report
 
 
-def load_hybrid6_raw_features(net, weights, gene_name, gene_final, args, run_dir):
-    # hybrid6_raw = original3_raw + multiomics3_raw。
-    # 本实验固定使用六维原始特征，不在拼接阶段执行 Z-score 或 Min-Max。
-    cleaned_gene_name = validate_gene_order(gene_name)
-    if args.original_feature_path:
-        original_path = resolve_path(args.original_feature_path)
-        if not original_path.exists():
-            raise FileNotFoundError(f"未找到原始三维特征文件：{original_path}")
-        original_df = pd.read_csv(original_path)
-        required_original = ["Gene", "Degree", "WeightValue", "PatientCoverageCount"]
-        missing_original = [c for c in required_original if c not in original_df.columns]
-        if missing_original:
-            raise ValueError(f"原始三维特征文件缺少必需列：{missing_original}")
-        original_df = original_df[required_original].copy()
-        original_df["Gene"] = original_df["Gene"].map(inputall.clean_gene_symbol)
-        if original_df["Gene"].isna().any():
-            raise ValueError("原始三维特征文件包含无效的 Gene 值。")
-        duplicate_original = int(original_df["Gene"].duplicated().sum())
-        if duplicate_original:
-            examples = original_df.loc[original_df["Gene"].duplicated(), "Gene"].head(10).tolist()
-            raise ValueError(
-                f"原始三维特征文件包含 {duplicate_original} 个重复基因，示例：{examples}"
-            )
-        for column in required_original[1:]:
-            original_df[column] = pd.to_numeric(original_df[column], errors="coerce")
-        if original_df[required_original[1:]].isna().any().any():
-            raise ValueError("原始三维特征列包含非数值或 NaN。")
-        indexed_original = original_df.set_index("Gene")
-        missing_ppi_original = [gene for gene in cleaned_gene_name if gene not in indexed_original.index]
-        if missing_ppi_original:
-            raise ValueError(
-                f"原始三维特征文件缺少 {len(missing_ppi_original)} 个 PPI 基因；"
-                f"示例={missing_ppi_original[:10]}"
-            )
-        original = indexed_original.loc[
-            cleaned_gene_name,
-            ["Degree", "WeightValue", "PatientCoverageCount"],
-        ].to_numpy(dtype=np.float32)
-        original_source = str(original_path)
-        original_extra_count = int(len(set(indexed_original.index) - set(cleaned_gene_name)))
-    else:
-        original = inputall.build_original_node_features_raw(
-            net,
-            weights,
-            cleaned_gene_name,
-            gene_final,
-        )
-        original_source = (
-            "inputall.build_original_node_features_raw("
-            "PPI degree, weights, patient coverage)"
-        )
-        original_extra_count = 0
-    if original.shape != (9039, 3):
-        raise ValueError(f"original3_raw 的形状必须为 (9039, 3)，实际为 {original.shape}。")
-    multiomics, multiomics_report = load_multiomics_three_columns_strict(
-        args.multiomics_feature_path,
-        cleaned_gene_name,
-    )
-    node_features = np.concatenate([original, multiomics], axis=1).astype(np.float32)
-    report = {
-        "feature_mode": FEATURE_MODE,
-        "feature_columns": FEATURE_COLUMNS,
-        "standardize": False,
-        "original_feature_source": original_source,
-        "original_feature_path_argument": args.original_feature_path,
-        "original_extra_gene_count": original_extra_count,
-        "multiomics_report": multiomics_report,
-        "ppi_node_count": len(cleaned_gene_name),
-        "original_feature_match_count": len(cleaned_gene_name),
-        "multiomics_feature_match_count": multiomics_report["matched_genes"],
-        "zero_filled_gene_count": multiomics_report["zero_filled_ppi_genes"],
-        "node_features_shape": list(node_features.shape),
-        "nan_count": int(np.isnan(node_features).sum()),
-        "inf_count": int(np.isinf(node_features).sum()),
-        "gene_order_matches_ppi": True,
-    }
-    if node_features.shape != (9039, FEATURE_DIM):
-        raise ValueError(f"hybrid6_raw 特征矩阵形状必须为 (9039, 6)，实际为 {node_features.shape}。")
-    if report["nan_count"] or report["inf_count"]:
-        raise ValueError(f"hybrid6_raw 包含非有限值：{report}")
-    (run_dir / "feature_alignment_report.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    logging.info("PPI 节点数：%s", report["ppi_node_count"])
-    logging.info("原始三维特征匹配基因数：%s", report["original_feature_match_count"])
-    logging.info("多组学特征匹配基因数：%s", report["multiomics_feature_match_count"])
-    logging.info("多组学缺失并补零的 PPI 基因数：%s", report["zero_filled_gene_count"])
-    logging.info("最终节点特征矩阵形状：%s", tuple(node_features.shape))
-    logging.info("NaN 数量：%s", report["nan_count"])
-    logging.info("Inf 数量：%s", report["inf_count"])
-    return node_features, cleaned_gene_name, report
 
 
 def build_environment(args, run_dir, normalization_metadata=None):
@@ -964,8 +868,6 @@ def build_agent(args, env, device):
     agent.lr = args.learning_rate
     agent.tau = args.tau
     agent.epsilon_min = args.epsilon_end
-    # epsilon 由 train.py 按全局步数统一管理，关闭 DQN 中旧的逐次学习更新，避免两套调度冲突。
-    agent.epsilon_increment = 0.0
     for group in agent.Q.optimizer.param_groups:
         group["lr"] = args.learning_rate
     agent.memory.alpha = args.per_alpha
@@ -1024,8 +926,7 @@ def append_action_reward_log(run_dir, rows):
 
 
 def run_episode(agent, env, args, episode, run_dir=None):
-    # 当前训练入口保留全局动作空间。由于提供的训练入口中没有经过验证的 PPI 邻居候选集初始化规则，
-    # 因此不调用 DQN.getAction()，避免自行引入未经验证的环境语义。
+    # 当前训练入口保留全局动作空间与动作掩码，不做 PPI 邻居扩展动作集。
     action_sel = list(range(agent.n_actions))
     agent.actions = []
     agent.actions_index = np.ones(agent.n_actions, dtype=np.int64)

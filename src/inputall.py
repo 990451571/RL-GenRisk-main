@@ -713,30 +713,6 @@ def get_node_features_by_mode(
     return features.astype(np.float32), feature_names, feature_mode, norm
 
 
-def get_node_feature_report_by_mode(
-    net,
-    weights,
-    gene_name,
-    gene_final,
-    feature_mode="original3_raw",
-    multiomics_feature_path=None,
-    cnv_missing_gene_path=DEFAULT_CNV_MISSING_GENE_PATH,
-    normalization_metadata=None,
-):
-    feature_mode = str(feature_mode).lower()
-    if multiomics_feature_path is None:
-        multiomics_feature_path = default_multiomics_feature_path_for_mode(feature_mode)
-    return get_node_features_by_mode(
-        net,
-        weights,
-        gene_name,
-        gene_final,
-        feature_mode=feature_mode,
-        multiomics_feature_path=multiomics_feature_path,
-        cnv_missing_gene_path=cnv_missing_gene_path,
-        normalization_metadata=normalization_metadata,
-        return_report=True,
-    )
 
 
 def get_node_features(
@@ -829,28 +805,6 @@ def getGene(patients):
     return gene_dic
 
 
-def random_getGene(patients, gene_name):
-    gene_dic = {}
-    gene_name = {clean_gene_symbol(gene) for gene in gene_name}
-    for patient in list(patients.keys()):
-        genes = patients[patient]
-        for gene in genes:
-            gene = clean_gene_symbol(gene)
-            if gene in list(gene_name):
-                if gene not in list(gene_dic.keys()):
-                    gene_dic[gene] = [patient]
-                else:
-                    gene_dic[gene].append(patient)
-    return gene_dic
-
-
-def random_patient(patients):
-    ran_patient = {}
-    num = int(len(patients) * 0.85)
-    a = random.sample(list(patients.keys()), num)
-    for i in a:
-        ran_patient[i] = patients[i]
-    return ran_patient
 
 
 def _read_ppi_network(gene, network_path=None):
