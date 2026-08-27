@@ -498,8 +498,8 @@ def validate_gene_order(gene_name):
     if duplicates.any():
         examples = pd.Series(cleaned)[duplicates].head(10).tolist()
         raise ValueError(f"PPI 基因列表中存在 {int(duplicates.sum())} 个重复基因，示例：{examples}")
-    if len(cleaned) != 9039:
-        raise ValueError(f"预期 PPI 节点数为 9039，实际为 {len(cleaned)}。")
+    if len(cleaned) != inputall.EXPECTED_PPI_NODE_COUNT:
+        raise ValueError(f"预期 PPI 节点数为 {inputall.EXPECTED_PPI_NODE_COUNT}，实际为 {len(cleaned)}。")
     return cleaned
 
 
@@ -600,8 +600,8 @@ def load_original_three_columns_features(net, weights, gene_name, gene_final, or
         )
         source = "inputall.build_original_node_features_raw(PPI degree, weights, patient coverage)"
         extra_count = 0
-    if original.shape != (9039, 3):
-        raise ValueError(f"original3 feature matrix must have shape (9039, 3), got {original.shape}.")
+    if original.shape != (inputall.EXPECTED_PPI_NODE_COUNT, 3):
+        raise ValueError(f"original3 feature matrix must have shape ({inputall.EXPECTED_PPI_NODE_COUNT}, 3), got {original.shape}.")
     return original.astype(np.float32), source, extra_count
 
 
@@ -703,8 +703,8 @@ def load_node_features_by_mode(
         raise ValueError(f"Unsupported feature_mode: {feature_mode}")
 
     node_features = np.asarray(node_features, dtype=np.float32)
-    if node_features.shape != (9039, expected_dim):
-        raise ValueError(f"{feature_mode} feature matrix must have shape (9039, {expected_dim}), got {node_features.shape}.")
+    if node_features.shape != (inputall.EXPECTED_PPI_NODE_COUNT, expected_dim):
+        raise ValueError(f"{feature_mode} feature matrix must have shape ({inputall.EXPECTED_PPI_NODE_COUNT}, {expected_dim}), got {node_features.shape}.")
     nan_count = int(np.isnan(node_features).sum())
     inf_count = int(np.isinf(node_features).sum())
     if nan_count or inf_count:
@@ -1167,12 +1167,14 @@ def evaluate_validation(agent, env, args, run_dir, episode):
 
 def checkpoint_payload(agent, args, env, episode, best_val_ndcg150):
     args_dict = vars(args).copy()
+    online_state = agent.Q.state_dict()
+    target_state = agent.Q_target.state_dict()
     return {
         "episode": int(episode),
-        "online_net_state_dict": agent.Q.state_dict(),
-        "target_net_state_dict": agent.Q_target.state_dict(),
-        "online_state_dict": agent.Q.state_dict(),
-        "target_state_dict": agent.Q_target.state_dict(),
+        "online_net_state_dict": online_state,
+        "target_net_state_dict": target_state,
+        "online_state_dict": online_state,
+        "target_state_dict": target_state,
         "optimizer_state_dict": agent.Q.optimizer.state_dict(),
         "best_val_ndcg150": float(best_val_ndcg150),
         "epsilon": float(agent.epsilon),

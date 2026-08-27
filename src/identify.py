@@ -1,19 +1,13 @@
 from inputall import *
-from DQN import *
-import matplotlib.pyplot as plt
+from DQN import DeepQNetwork
 import os
 import csv
 import argparse
-import copy
 import hashlib
-import json
 from pathlib import Path
 import numpy as np
-import networkx as nx
 import random
 import inputall
-from sklearn import preprocessing
-from statsmodels.stats.multitest import multipletests
 
 # 🚀 关键修复 1：把显卡视野切回你电脑上的唯一主卡 (GPU 0)
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -21,7 +15,6 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 
 torch.set_num_threads(4)
-gene_sta = []
 
 
 def str_to_bool(value):
@@ -102,67 +95,6 @@ def seed_torch(seed=42):
     torch.backends.cudnn.enabled = False
 
 
-test_sta_total = []
-test_sta = []
-test_sta2 = []
-sample_index = []
-
-def Normalized(feature):
-    X_scaler = preprocessing.StandardScaler()
-    X_train = X_scaler.fit_transform(feature)
-    return X_train
-
-
-def Normalized_minmax(feature):
-    X_scaler = preprocessing.MinMaxScaler()
-    X_train = copy.deepcopy(feature)
-    for i in range(len(feature[0])):
-        X_train[:, [i]] = X_scaler.fit_transform(feature[:, [i]])
-    return X_train
-
-
-def get_feature(net, weights, gene_name, gene_final):
-    return build_original_node_features(net, weights, gene_name, gene_final)
-
-
-def get_feature1(net, actions, weights, gene_name, gene_final):
-    feature = build_original_node_features(net, weights, gene_name, gene_final)
-    if len(actions) > 0:
-        feature[actions, :] = 0.0
-    return feature
-
-
-def laplacian(net):
-    lap = copy.deepcopy(net)
-    lap = lap * (-1)
-    for i in range(net.shape[0]):
-        lap[i][i] = np.sum(net[i])
-    return lap
-
-
-def evaluate(gene2):
-    gene_sta = []
-    with open('../data/GeneID.csv', 'r') as f:
-        reader = csv.reader(f)
-        for i in reader:
-            gene_sta.append(i[0])
-
-    gene1_num = []
-    num = 0
-    for i in list(gene2.keys()):
-        if i in gene_sta:
-            num = num + 1
-    num1 = 0
-    num2 = 0
-    for i in list(gene2.keys()):
-        if i in test_sta:
-            num1 = num1 + 1
-        if i in test_sta2:
-            num2 = num2 + 1
-
-    return num, num1, num2
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Rank genes with a trained RL-GenRisk DDQN model.")
     parser.add_argument("--cancer", default=os.getenv("RL_GENRISK_CANCER", "KIRC"))
@@ -209,113 +141,6 @@ def parse_args():
         default=None if os.getenv("RL_GENRISK_STANDARDIZE_MULTIOMICS") is None else str_to_bool(os.getenv("RL_GENRISK_STANDARDIZE_MULTIOMICS")),
     )
     return parser.parse_args()
-
-
-def get_data_output(network_path, label_path, embedding_path, embedding_index_path):
-    df_HPRD = pd.read_csv(resolve_data_path(network_path or 'HPRD.txt'), sep=' ', header=None)
-    edge_list = np.array(df_HPRD)
-    G_hprd = nx.Graph()
-    G_hprd.add_edges_from(edge_list)
-    nodelist = list(G_hprd.nodes())
-    df_gold = pd.read_csv(resolve_data_path(label_path), header=None)
-    lst_gold = df_gold[0].tolist()
-    lst_gold = np.intersect1d(nodelist, lst_gold)
-    embedding = np.load(resolve_data_path(embedding_path))
-    df_gene_idx = pd.read_csv(resolve_data_path(embedding_index_path), sep='\t', header=None)
-    emb_gene_idx = df_gene_idx[0].tolist()
-    dict_embedding = {}
-    for i in range(len(emb_gene_idx)):
-        dict_embedding[emb_gene_idx[i]] = embedding[i]
-    return G_hprd, lst_gold, dict_embedding
-
-
-def one_side_ttest(value, lst_data):
-    from scipy import stats
-    data = lst_data
-    t_stat, p_value = stats.ttest_1samp(data, value)
-    p_value_lesser = p_value / 2 if t_stat > 0 else 1 - p_value / 2
-    p_value_greater = p_value / 2 if t_stat < 0 else 1 - p_value / 2
-    return p_value_greater, p_value_lesser
-
-
-def get_average_STPL(gene_ranking, G_hprd, lst_gold, random_samples):
-    dict_average_STPL = {}
-    dict_average_STPL_p = {}
-    for x in gene_ranking:
-        dict_average_STPL[x] = 0
-        dict_average_STPL_p[x] = 0
-    lst_data = []
-    for x in gene_ranking:
-        lst_lengths = []
-        for y in lst_gold:
-            if x == y:
-                continue
-            if nx.has_path(G_hprd, x, y):
-                length = nx.shortest_path_length(G_hprd, y, x)
-                lst_lengths.append(length)
-            else:
-                lst_lengths.append(15)
-        dict_average_STPL[x] = np.nanmean(lst_lengths)
-        lst_data.append(np.nanmean(lst_lengths))
-
-    lst_random_value = []
-    for x in random_samples:
-        lst_random_value.append(dict_average_STPL[x])
-    for x in gene_ranking:
-        p_greater, p_lesser = one_side_ttest(dict_average_STPL[x], lst_random_value)
-        dict_average_STPL_p[x] = p_lesser
-    return dict_average_STPL, dict_average_STPL_p
-
-
-def get_average_CS(gene_ranking, lst_gold, dict_embedding, random_samples):
-    from sklearn.metrics.pairwise import cosine_similarity
-    dict_average_CS = {}
-    dict_average_CS_p = {}
-    for x in gene_ranking:
-        dict_average_CS[x] = 0
-        dict_average_CS_p[x] = 0
-    lst_data = []
-    for x in gene_ranking:
-        lst_lengths = []
-        tmp_emb = dict_embedding[x].reshape(1, -1)
-        sim_lst = []
-        for y in lst_gold:
-            if x == y:
-                continue
-            tgt_emb = dict_embedding[y].reshape(1, -1)
-            sim = cosine_similarity(tmp_emb, tgt_emb)[0][0]
-            sim_lst.append(sim)
-        dict_average_CS[x] = np.nanmean(sim_lst)
-        lst_data.append(np.nanmean(sim_lst))
-    lst_random_value = []
-    for x in random_samples:
-        lst_random_value.append(dict_average_CS[x])
-    for x in gene_ranking:
-        p_greater, p_lesser = one_side_ttest(dict_average_CS[x], lst_random_value)
-        dict_average_CS_p[x] = p_greater
-    return dict_average_CS, dict_average_CS_p
-
-
-def FDR_adj_P(dict_average_STPL_p, dict_average_CS_p, gene_ranking):
-    dict_average_STPL_FDR_p = {}
-    dict_average_CS_FDR_p = {}
-    p_value_lst_STPL = []
-    p_value_lst_CS = []
-    for x in gene_ranking:
-        p_value_lst_STPL.append(dict_average_STPL_p[x])
-        p_value_lst_CS.append(dict_average_CS_p[x])
-
-    rejected, pvals_corrected_STPL, _, _ = multipletests(p_value_lst_STPL, method='fdr_bh')
-    rejected, pvals_corrected_CS, _, _ = multipletests(p_value_lst_CS, method='fdr_bh')
-    base = 9039
-    for i in range(len(gene_ranking)):
-        tmp_gene = gene_ranking[i]
-        tmp_FDR_p_STPL = pvals_corrected_STPL[i]
-        tmp_FDR_p_CS = pvals_corrected_CS[i]
-        dict_average_STPL_FDR_p[tmp_gene] = tmp_FDR_p_STPL
-        dict_average_CS_FDR_p[tmp_gene] = tmp_FDR_p_CS
-
-    return dict_average_STPL_FDR_p, dict_average_CS_FDR_p
 
 
 def _canonical_normalization_metadata(metadata):
@@ -528,8 +353,6 @@ def run(gene_final, score_alpha, args):
 
 
 if __name__ == "__main__":
-    import sys
-
     args = parse_args()
     cancer = args.cancer
     pre_metadata = None
@@ -562,21 +385,11 @@ if __name__ == "__main__":
                 args.standardize_multiomics = False
             args.use_multiomics = args.feature_source == "multiomics"
     seed = 1
-    weightnumber = 50
     seed_torch(seed)
-    # f = open("test_" + cancer + ".txt", "w")
-    # for i in range(test_sta_number):
-    #     if i in sample_index:
-    #         test_sta.append(test_sta_total[i])
-    #     else:
-    #         test_sta2.append(test_sta_total[i])
-    #         print(test_sta_total[i], file=f)
-    # f.close()
 
     test_sta_total = load_gene_list(args.label_path) if args.label_path else []
 
     test_sta = test_sta_total
-    test_sta2 = []
 
     train_patient_data, test_patient_data, patients = getInput(cancer, mutation_path=args.mutation_path)
     gene_data = getGene(patients)

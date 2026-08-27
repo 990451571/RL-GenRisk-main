@@ -1,10 +1,10 @@
 """Prioritized replay buffer for RL-GenRisk hybrid6_raw training.
 
-The node feature matrix is static during one transition, while the action mask
-changes after selecting a gene.  Each transition therefore stores:
+The node feature matrix is static across the whole training run, while the
+action mask changes after selecting a gene.  The static state is therefore
+stored once; each transition stores:
 
-    (state_features, action, reward, current_action_mask,
-     next_action_mask, done)
+    (action, reward, current_action_mask, next_action_mask, done)
 
 The public method names and sample_buffer() return order remain compatible with
 DQN.py.
@@ -44,10 +44,10 @@ class PrioritizedReplayBuffer:
         self.mem_cntr = 0
         self.sample_step = 0
 
-        # RL-GenRisk uses a static node-feature matrix as state.  We store one
-        # copy per transition because this preserves the existing DQN interface.
-        self.memory_s = np.zeros(
-            (self.mem_size, self.n_actions, self.feature_dim),
+        # 节点特征矩阵在整个训练期间都是静态的，只有动作掩码随选择变化。
+        # 因此只保存一份共享状态，逐条 transition 只存 action/reward/mask/done。
+        self.state_s = np.zeros(
+            (self.n_actions, self.feature_dim),
             dtype=np.float32,
         )
         self.memory_a = np.zeros((self.mem_size, 1), dtype=np.int64)
@@ -159,7 +159,8 @@ class PrioritizedReplayBuffer:
             raise ValueError(f"done must be 0/1 or bool, got {done!r}")
 
         index = self.mem_cntr % self.mem_size
-        self.memory_s[index] = state
+        # 状态（节点特征矩阵）在训练中恒定，只存一份副本即可（copy 防止与外部特征矩阵互为别名）。
+        self.state_s = state.copy()
         self.memory_a[index, 0] = action_value
         self.memory_r[index, 0] = reward_value
         self.memory_ai[index] = current_action_mask
@@ -235,7 +236,7 @@ class PrioritizedReplayBuffer:
             importance_weights /= max_weight
         importance_weights = importance_weights.astype(np.float32).reshape(-1, 1)
 
-        batch_s = self.memory_s[sample_indices].copy()
+        batch_s = np.repeat(self.state_s[np.newaxis, :, :], batch_size, axis=0)
         batch_a = self.memory_a[sample_indices].copy()
         batch_r = self.memory_r[sample_indices].copy()
         batch_current_mask = self.memory_ai[sample_indices].copy()
@@ -283,7 +284,7 @@ class PrioritizedReplayBuffer:
             self.priorities[index] = np.max(new_priorities[indices == index])
 
     def clear(self):
-        self.memory_s.fill(0.0)
+        self.state_s.fill(0.0)
         self.memory_a.fill(0)
         self.memory_r.fill(0.0)
         self.memory_ai.fill(0.0)

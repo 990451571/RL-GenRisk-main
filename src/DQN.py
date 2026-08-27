@@ -11,6 +11,14 @@ from mutation_frequency import (
 )
 
 
+# Legacy reward-scale magic numbers（改动会改变训练动态，务必先理解 reward 设计）：
+#   get_reward:  weight_score = weight_sum * n_actions / 150   （150 = 历史 topk）
+#   step:        patient component = patient_improve * 5.0，整体再乘 (1 - score_alpha) * 3000
+#                score component      = score_improve * 0.01
+#                driver ratio         = driver_improve * 5.0
+#                per-gene driver bonus = 1.0
+#                reward 截断到 [0, 5.0]
+#   learn:       reward 先除以 10.0 再作为 Q target
 class DeepQNetwork:
     def __init__(
             self,
@@ -36,7 +44,6 @@ class DeepQNetwork:
             reward_feature_columns=None,
             lowfreq_evidence_by_gene=None,
     ):
-        self.net_ori = copy.deepcopy(net_ori)
         self.fea_ori = copy.deepcopy(fea_ori)
         self.train_patient_data = train_patient_data
         self.test_patient_data = test_patient_data
@@ -97,24 +104,24 @@ class DeepQNetwork:
             )
         T = 3
         ALPHA = 0.0001
-        self.Q = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, self.net_ori)
-        self.Q_target = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, self.net_ori)
+        self.Q = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, net_ori)
+        self.Q_target = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, net_ori)
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.Q_target.eval()
         print(f"📌 Q network input feature dim: {self.feature_dim}")
         print(f"📌 Selection budget: {self.selection_budget}")
         dtype_bytes = np.dtype(np.float32).itemsize
-        state_bytes = self.memory_size * self.n_actions * self.feature_dim * dtype_bytes
-        state_and_next_state_bytes = 2 * state_bytes
+        shared_state_bytes = self.n_actions * self.feature_dim * dtype_bytes
+        mask_bytes = 2 * self.memory_size * self.n_actions * dtype_bytes
         gib = 1024 ** 3
         print(
             "📌 Replay buffer memory estimate before allocation: "
             f"memory_size={self.memory_size}, n_actions={self.n_actions}, "
-            f"feature_dim={self.feature_dim}, state≈{state_bytes / gib:.3f} GiB, "
-            f"state+next_state≈{state_and_next_state_bytes / gib:.3f} GiB "
+            f"feature_dim={self.feature_dim}, shared_state≈{shared_state_bytes / gib:.4f} GiB, "
+            f"action_masks≈{mask_bytes / gib:.3f} GiB "
             "(excluding action, reward, done, priority arrays and runtime overhead)"
         )
-        if state_and_next_state_bytes > 4 * gib:
+        if mask_bytes > 4 * gib:
             print(
                 "⚠️ 当前经验池可能占用大量内存，请通过 --memory-size 设置较小容量。"
             )
@@ -340,7 +347,7 @@ class DeepQNetwork:
                 driver_hit_num += 1
 
             # 保留原始权重和患者覆盖逻辑
-            if gene not in list(gene_num.keys()):
+            if gene not in gene_num:
                 weight_sum += self.weights[gene]
             else:
                 patient_num.extend(gene_num[gene])
@@ -512,17 +519,11 @@ class DeepQNetwork:
         self.Q_target.eval()
         # ========== 从经验回放池采样一批经验 ==========
         # 对应：(S, A, R, S', 动作掩码)
-        state, action, reward_sum, action_index, sel_action, done, sample_indices, is_weights = \
+        state, action, reward_sum, action_index, next_action_index, done, sample_indices, is_weights = \
             self.memory.sample_buffer(self.batch_size)
         # 清空 Q 网络的梯度（上一步的梯度残留要清掉）
         self.Q.optimizer.zero_grad()
         mu = None
-        action_temp = copy.deepcopy(action)
-        action_index_new = copy.deepcopy(action_index)
-        # 构造「下一状态 S'」的动作掩码（把当前动作 A 设为已选）
-        for i in range(self.batch_size):
-            action_temp_real = int(action_temp[i])
-            action_index_new[i, action_temp_real] = 0
 
         state = torch.tensor(state, dtype=torch.float32).to(self.Q.device)
         action = torch.LongTensor(action).view(-1, 1).to(self.Q.device)
@@ -531,8 +532,7 @@ class DeepQNetwork:
         new_state = state.clone()
 
         action_index = torch.LongTensor(action_index).to(self.Q.device)
-        action_index_new = torch.LongTensor(action_index_new).to(self.Q.device)
-        sel_action = torch.LongTensor(sel_action).to(self.Q.device)
+        next_action_index = torch.LongTensor(next_action_index).to(self.Q.device)
         done = torch.tensor(done, dtype=torch.float32).view(-1, 1).to(self.Q.device)
         is_weights = torch.tensor(is_weights, dtype=torch.float32).to(self.Q.device)
 
@@ -541,18 +541,18 @@ class DeepQNetwork:
         with torch.no_grad():  # 眺望未来不需要计算梯度，省显存+加速
             # Online Network 负责动作选择：
             # a* = argmax Q_online(s'_i, a')
-            next_q_values_online, _ = self.Q(mu, new_state, action_index_new, batch_flag=True)
+            next_q_values_online, _ = self.Q(mu, new_state, next_action_index, batch_flag=True)
             # ⚠️ 极其关键的“掩码(Masking)”操作：
-            # action_index_new 中为 0 代表该基因已经入选，不能再挑了。
+            # next_action_index 中为 0 代表该基因已经入选，不能再挑了。
             # 我们把这些不可选基因的 Q 值强行变成 -1e9（极小值），防止 argmax 选错。
-            mask = action_index_new == 0
+            mask = next_action_index == 0
             next_q_values_online = next_q_values_online.masked_fill(mask, -1e9)
 
             # 找出最高分的动作索引，对应公式里的 argmax a'
             best_next_actions = next_q_values_online.argmax(dim=1, keepdim=True)
 
             # 第二步：目标网络 (self.Q_target) 当“裁判”，对 S' 进行独立打分
-            next_q_values_target, _ = self.Q_target(mu, new_state, action_index_new, batch_flag=True)
+            next_q_values_target, _ = self.Q_target(mu, new_state, next_action_index, batch_flag=True)
             next_q_target = next_q_values_target.gather(1, best_next_actions)
 
             y_target = reward_sum + self.gamma * (1.0 - done) * next_q_target

@@ -21,6 +21,8 @@ REQUIRED_MULTIOMICS_COLUMNS = ["Mutation", "Expression", "Methylation"]
 SUPPORTED_MULTIOMICS_COLUMNS = ["Mutation", "Expression", "Methylation", "CNV"]
 MULTIOMICS_COLUMNS = SUPPORTED_MULTIOMICS_COLUMNS
 INVALID_GENE_SYMBOLS = {"", "?", "NA", "N/A", "NAN", "NONE", "NULL"}
+# PPI 基因全集大小。edge_index、特征矩阵、ranking、label 对齐都围绕该数值构建，改动风险极高。
+EXPECTED_PPI_NODE_COUNT = 9039
 FEATURE_MODE_COLUMNS = {
     "original3_raw": ["Degree", "WeightValue", "PatientCoverageCount"],
     "original3_zscore": ["Degree", "WeightValue", "PatientCoverageCount"],
