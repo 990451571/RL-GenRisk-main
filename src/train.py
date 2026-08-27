@@ -503,58 +503,6 @@ def validate_gene_order(gene_name):
     return cleaned
 
 
-def load_multiomics_three_columns_strict(path, gene_name):
-    path = resolve_path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"未找到多组学特征文件：{path}")
-    df = pd.read_csv(path)
-    required = ["Gene", "Mutation", "Expression", "Methylation"]
-    missing = [column for column in required if column not in df.columns]
-    if missing:
-        raise ValueError(f"多组学文件缺少必需列：{missing}")
-    raw_gene_count = len(df)
-    df = df[required].copy()
-    df["Gene"] = df["Gene"].map(inputall.clean_gene_symbol)
-    invalid_gene_count = int(df["Gene"].isna().sum())
-    df = df[df["Gene"].notna()].copy()
-    duplicated_mask = df["Gene"].duplicated(keep=False)
-    duplicate_count = int(df.loc[duplicated_mask, "Gene"].nunique())
-    if duplicate_count:
-        examples = sorted(df.loc[duplicated_mask, "Gene"].dropna().unique().tolist())[:10]
-        raise ValueError(
-            f"Multi-omics feature file contains duplicate Gene values after cleaning; "
-            f"duplicate_gene_count={duplicate_count}; examples={examples}; "
-            "refusing silent aggregation."
-        )
-    for column in ["Mutation", "Expression", "Methylation"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    if df[["Mutation", "Expression", "Methylation"]].isna().any().any():
-        raise ValueError("多组学数值列转换后包含 NaN。")
-    values = df[["Mutation", "Expression", "Methylation"]].to_numpy(dtype=np.float32)
-    if np.isnan(values).any() or np.isinf(values).any():
-        raise ValueError("多组学数值列包含 NaN 或 Inf。")
-    indexed = df.set_index("Gene")
-    features = np.zeros((len(gene_name), 3), dtype=np.float32)
-    matched = 0
-    for idx, gene in enumerate(gene_name):
-        if gene in indexed.index:
-            features[idx] = indexed.loc[gene, ["Mutation", "Expression", "Methylation"]].to_numpy(dtype=np.float32)
-            matched += 1
-    report = {
-        "path": str(path),
-        "raw_rows": raw_gene_count,
-        "invalid_gene_count": invalid_gene_count,
-        "unique_genes_after_cleaning": int(len(df)),
-        "duplicate_gene_count_after_cleaning": duplicate_count,
-        "duplicate_gene_count_before_groupby": duplicate_count,
-        "ppi_nodes": int(len(gene_name)),
-        "matched_genes": int(matched),
-        "zero_filled_ppi_genes": int(len(gene_name) - matched),
-        "extra_multiomics_genes": int(len(set(df["Gene"]) - set(gene_name))),
-    }
-    return features, report
-
-
 def load_original_three_columns_features(net, weights, gene_name, gene_final, original_feature_path=None):
     cleaned_gene_name = validate_gene_order(gene_name)
     if original_feature_path:
@@ -620,7 +568,6 @@ def load_node_features_by_mode(
     cleaned_gene_name = validate_gene_order(gene_name)
     uses_original = feature_mode.startswith("original3") or feature_mode.startswith("hybrid")
     uses_multiomics = feature_mode.startswith("multiomics") or feature_mode.startswith("hybrid")
-    needs_cnv = feature_mode in FOUR_OMICS_FEATURE_MODES
 
     original = None
     original_source = None
@@ -634,73 +581,19 @@ def load_node_features_by_mode(
             args.original_feature_path,
         )
 
-    multiomics = None
-    multiomics_report = {}
     multiomics_path = resolve_multiomics_path_for_args(args)
-    if uses_multiomics:
-        if needs_cnv:
-            multiomics, multiomics_report = inputall.load_multiomics_features_for_columns(
-                multiomics_path,
-                cleaned_gene_name,
-                ["Mutation", "Expression", "Methylation", "CNV"],
-                cnv_missing_gene_path=args.cnv_missing_gene_path,
-            )
-        else:
-            multiomics, multiomics_report = load_multiomics_three_columns_strict(
-                multiomics_path,
-                cleaned_gene_name,
-            )
-
-    cnv_normalization_metadata = None
-    if feature_mode in {"multiomics4_zscore", "hybrid7_zscore"} and normalization_metadata is None:
-        cnv_normalization_metadata = inputall.compute_full_multiomics_cnv_normalization_metadata(
-            multiomics_path,
-            args.cnv_missing_gene_path,
-        )
-
-    norm = {"method": "none", "feature_names": feature_columns}
-    if feature_mode == "original3_raw":
-        node_features = original
-    elif feature_mode == "original3_zscore":
-        node_features, norm = inputall._zscore_node_features(
-            original,
-            feature_columns,
-            normalization_metadata,
-        )
-    elif feature_mode == "multiomics3_raw":
-        node_features = multiomics
-    elif feature_mode == "hybrid6_raw":
-        node_features = np.concatenate([original, multiomics], axis=1).astype(np.float32)
-    elif feature_mode == "hybrid6_zscore":
-        raw = np.concatenate([original, multiomics], axis=1).astype(np.float32)
-        node_features, norm = inputall._zscore_node_features(
-            raw,
-            feature_columns,
-            normalization_metadata,
-        )
-    elif feature_mode == "multiomics4_raw":
-        node_features = multiomics
-    elif feature_mode == "hybrid7_raw":
-        node_features = np.concatenate([original, multiomics], axis=1).astype(np.float32)
-    elif feature_mode == "multiomics4_zscore":
-        node_features, norm = inputall._zscore_node_features_with_cnv_missing(
-            multiomics,
-            feature_columns,
-            multiomics_report["_cnv_observed_mask"],
-            normalization_metadata,
-            cnv_normalization_metadata,
-        )
-    elif feature_mode == "hybrid7_zscore":
-        raw = np.concatenate([original, multiomics], axis=1).astype(np.float32)
-        node_features, norm = inputall._zscore_node_features_with_cnv_missing(
-            raw,
-            feature_columns,
-            multiomics_report["_cnv_observed_mask"],
-            normalization_metadata,
-            cnv_normalization_metadata,
-        )
-    else:
-        raise ValueError(f"Unsupported feature_mode: {feature_mode}")
+    node_features, _, _, norm, inputall_report = inputall.get_node_features_by_mode(
+        net,
+        weights,
+        cleaned_gene_name,
+        gene_final,
+        feature_mode=feature_mode,
+        multiomics_feature_path=multiomics_path,
+        cnv_missing_gene_path=args.cnv_missing_gene_path,
+        normalization_metadata=normalization_metadata,
+        original_features=original,
+        return_report=True,
+    )
 
     node_features = np.asarray(node_features, dtype=np.float32)
     if node_features.shape != (inputall.EXPECTED_PPI_NODE_COUNT, expected_dim):
@@ -710,11 +603,7 @@ def load_node_features_by_mode(
     if nan_count or inf_count:
         raise ValueError(f"{feature_mode} contains non-finite values: nan={nan_count}, inf={inf_count}")
 
-    public_multiomics_report = {
-        key: value
-        for key, value in (multiomics_report or {}).items()
-        if not str(key).startswith("_")
-    }
+    public_multiomics_report = dict(inputall_report.get("multiomics_report") or {})
     report = {
         "feature_mode": feature_mode,
         "feature_columns": feature_columns,

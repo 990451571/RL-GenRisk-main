@@ -610,6 +610,7 @@ def get_node_features_by_mode(
     multiomics_feature_path=DEFAULT_MULTIOMICS_FEATURE_PATH,
     cnv_missing_gene_path=DEFAULT_CNV_MISSING_GENE_PATH,
     normalization_metadata=None,
+    original_features=None,
     return_report=False,
 ):
     original_names = ["Degree", "WeightValue", "PatientCoverageCount"]
@@ -617,7 +618,9 @@ def get_node_features_by_mode(
     multiomics4_names = ["Mutation", "Expression", "Methylation", "CNV"]
     feature_mode = str(feature_mode).lower()
 
-    if feature_mode in {"original3_raw", "original3_zscore", "hybrid6_raw", "hybrid6_zscore", "hybrid7_raw", "hybrid7_zscore"}:
+    if original_features is not None:
+        original = original_features
+    elif feature_mode in {"original3_raw", "original3_zscore", "hybrid6_raw", "hybrid6_zscore", "hybrid7_raw", "hybrid7_zscore"}:
         original = build_original_node_features_raw(net, weights, gene_name, gene_final)
     else:
         original = None

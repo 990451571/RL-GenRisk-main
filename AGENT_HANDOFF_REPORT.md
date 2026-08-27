@@ -510,6 +510,12 @@ Protocol B 相关：
 
    Stage1/Stage2/Stage4/4B 脚本和主训练代码都围绕 9039 节点构建。改 gene universe 会影响 edge_index、feature matrix、ranking、label overlap 和 checkpoint 兼容性。
 
+6. 排名方法当前是「一次性打分」，可考虑改进为「贪心 rollout」。
+
+   当前 `evaluate_validation` / `write_ranking` 用空选择（mask 全 1）做单次前向，按每个基因在该状态下的 Q 值排序。这在训练第 0 步（同样空选择）下是自洽的，不是 bug。但它没有利用模型「逐个选」的能力去考虑基因之间的冗余/互补。
+
+   未来可改进方向（研究性，非 bug 修复）：改成贪心 rollout —— 选最高 Q 的基因 → 更新动作掩码 → 基于新状态重新打分 → 再选下一个，直到达到 topk，得到一个考虑冗余的排序。涉及 `src/train.py::evaluate_validation`、`write_ranking` 与 `src/qfunction.py::Q_Fun.forward` 的 graph_pool 上下文。
+
 ## 12. 给后续 agent 的建议流程
 
 接到新需求后建议按此顺序：
