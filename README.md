@@ -1,42 +1,60 @@
 # RL-GenRisk
 
-RL-GenRisk is a research codebase for ranking cancer-related genes with multi-omics data, biological networks, graph neural networks, and DDQN/PER reinforcement learning.
+基于多组学数据、生物网络、图神经网络与 DDQN/PER 强化学习的癌症相关基因排序研究代码库。
 
-This repository is currently an experimental research workspace, not a packaged clinical or production tool. Rankings produced by the code are research outputs and must not be interpreted as clinical risk conclusions.
+---
 
-## Main Entry Points
+## 低频奖励实验记录（2026-08-31）
 
-- `src/train.py`: main training, validation, ranking, and checkpoint flow.
-- `src/DQN.py`: DDQN agent, reward components, PER learning update, and target-network update.
-- `src/qfunction.py`: GCN-based Q function used by the current main training path.
-- `src/inputall.py`: data loading and node-feature construction.
-- `src/replay_buffer.py`: prioritized replay buffer.
-- `src/mutation_frequency.py`: mutation-frequency stratification utilities.
+### 一、目的
 
-## Experiment Code
+此前正式训练（100 轮 legacy）的验证结果较弱：NDCG@150 ≈ 0.06、Recall@150 ≈ 0.04（25 个验证 driver 基因只命中 1 个）。分析认为根因是：
 
-Historical staged experiment code is kept in a flat `experiments` layout:
+1. **训练/验证基因不重叠** → reward 用 16 个 train driver，评估用 25 个不同的 val driver，「+1.0 直接命中训练标签」的奖励会诱导模型**背答案**而非学泛化规律；
+2. **driver 信号太弱** → 被「患者覆盖」等信号淹没。
 
-- `experiments/scripts/stage1_grn_audit.py`
-- `experiments/scripts/stage2_multigraph_experiment.py`
-- `experiments/scripts/stage3_relation_aware_experiment.py`
-- `experiments/scripts/stage4_fixed_preference.py`
-- `experiments/scripts/stage4b_missingness_aware_lowfreq.py`
-- `experiments/configs`
-- `experiments/protocol_B`
+本实验验证两个假设：
 
-Read `AGENT_HANDOFF_REPORT.md` before making code changes.
+- **假设 A**：低频证据（label 无关的冻结证据表，`lowfreq_unlabeled_*` reward）能否改善对低频 driver 基因的发现；
+- **假设 B**：去掉「+1.0 直接命中训练标签」奖励，能否减少背答案、改善泛化。
 
-## Data Protocol
+### 二、计划（7 个 run，统一 seed 0、50 轮）
 
-Protocol B label files are stored under `experiments/protocol_B` so the default Train/Validation label paths do not depend on `E:\codex_file`.
+⚠️ 说明：这 7 个 run **不是 7 个不同的随机种子**，它们**都用同一个 seed = 0**；区别只在「reward 模式」和「train-label-bonus（直接命中奖励）」这两个变量。
 
-The current method uses Train labels during training/reward where configured, Validation labels for checkpoint selection and metrics, and Test labels only for explicitly requested final test evaluation.
+| run | reward 模式 | train-label-bonus | 代表含义 |
+|---|---|---|---|
+| exp1 | legacy | 1.0（默认） | 基准对照（旧方法） |
+| exp2 | lowfreq V1 | 1.0 | V1 证据 + 默认命中奖励 |
+| exp3 | lowfreq V1 | 0.0 | V1 证据 + **去掉**命中奖励 |
+| exp4 | lowfreq V1 | 0.5 | V1 证据 + 命中奖励**减半** |
+| exp5 | lowfreq V2 | 1.0 | V2 证据 + 默认命中奖励 |
+| exp6 | lowfreq V2 | 0.0 | V2 证据 + **去掉**命中奖励 |
+| exp7 | lowfreq V2 | 0.5 | V2 证据 + 命中奖励**减半** |
 
-## Environment
+- **V1 / V2**：低频证据表的两个版本（V2 为正式验证版，证据分更细）。
+- **train-label-bonus**：选中 train driver 基因时的直接命中奖励，默认 1.0；0.0 = 完全去掉，0.5 = 减半。
+- 统一参数：feature_mode=hybrid6_raw、max_episodes=50、seed=0、lowfreq bonus scale=1.2396 / cap=1.0。
 
-Use `environment.yaml` as the primary environment specification. `requirements.txt` is not sufficient by itself for model training because the project depends on PyTorch and PyTorch Geometric.
+### 三、结果（验证集指标，最佳 checkpoint）
 
-## Current Method Note
+| run | 配置 | NDCG@150 | Recall@150 | 命中数 | MRR | 平均排名 |
+|---|---|---|---|---|---|---|
+| **exp6** | **V2 + 去命中** | **0.0785** | **0.08** | **2** | **0.0143** | **2528** |
+| exp4 | V1 + 减半 | 0.0700 | 0.08 | 2 | 0.0108 | 3394 |
+| exp5 | V2 + 默认 | 0.0656 | 0.08 | 2 | 0.0086 | 5313 |
+| exp3 | V1 + 去命中 | 0.0651 | 0.08 | 2 | 0.0087 | 4343 |
+| exp1 | legacy 基准 | 0.0615 | 0.04 | 1 | 0.0139 | 3689 |
+| exp7 | V2 + 减半 | 0.0615 | 0.04 | 1 | 0.0142 | 2603 |
+| exp2 | V1 + 默认 | 0.0530 | 0.04 | 1 | 0.0109 | 1517 |
 
-The current main training path selects from the global 9039-gene action pool with an action mask. This differs from a strict PPI-neighborhood expansion MDP. Treat any change back to neighbor-restricted actions as a separate experimental stage.
+### 四、结论
+
+1. **低频证据有效**：所有 lowfreq 配置的 Recall ≥ 基准（命中 1 → 2）。
+2. **去掉 +1.0 命中奖励有帮助**：V2 下，去命中（exp6, 0.0785）> 默认（exp5, 0.0656）。
+3. **最佳配置 = lowfreq V2 + train-label-bonus 0.0**（exp6），相比 legacy 基准 NDCG@150 提升约 28%，Recall 翻倍，driver 平均排名从 3689 → 2528。
+
+### 五、局限与下一步
+
+- **局限**：单 seed（seed 0）、绝对值仍弱（Recall 0.08 = 25 个 driver 只找到 2 个）。
+- **下一步**：用 exp6 配置（V2 + 去命中）跑多种子（seed 42/43/44）验证稳定性；确认后可继续叠加 GRN SimpleUnion 或调 bonus scale。

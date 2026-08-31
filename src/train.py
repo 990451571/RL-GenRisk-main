@@ -354,6 +354,7 @@ def parse_args():
     parser.add_argument("--lowfreq-evidence-path", default=None, help="Frozen label-independent low-frequency evidence table path.")
     parser.add_argument("--lowfreq-unlabeled-bonus-scale", type=float, default=None, help="Frozen lowfreq_unlabeled_* evidence bonus scale.")
     parser.add_argument("--lowfreq-unlabeled-bonus-cap", type=float, default=None, help="Frozen lowfreq_unlabeled_* evidence bonus cap.")
+    parser.add_argument("--train-label-bonus", type=float, default=1.0, help="选中 train driver 基因时的直接命中奖励（默认 1.0；设 0 则去掉，0.5 则减半）。")
     return parser.parse_args()
 
 
@@ -400,6 +401,7 @@ def validate_training_args(args):
         "lowfreq_expression_weight": args.lowfreq_expression_weight,
         "lowfreq_methylation_weight": args.lowfreq_methylation_weight,
         "lowfreq_bonus_cap": args.lowfreq_bonus_cap,
+        "train_label_bonus": args.train_label_bonus,
     }
     if args.lowfreq_unlabeled_bonus_scale is not None:
         reward_weights["lowfreq_unlabeled_bonus_scale"] = args.lowfreq_unlabeled_bonus_scale
@@ -713,6 +715,7 @@ def build_agent(args, env, device):
         "lowfreq_expression_weight": args.lowfreq_expression_weight,
         "lowfreq_methylation_weight": args.lowfreq_methylation_weight,
         "lowfreq_bonus_cap": args.lowfreq_bonus_cap,
+        "train_label_bonus": args.train_label_bonus,
     }
     if args.lowfreq_unlabeled_bonus_scale is not None:
         reward_weights["lowfreq_unlabeled_bonus_scale"] = args.lowfreq_unlabeled_bonus_scale

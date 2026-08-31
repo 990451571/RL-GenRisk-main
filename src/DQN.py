@@ -16,7 +16,7 @@ from mutation_frequency import (
 #   step:        patient component = patient_improve * 5.0，整体再乘 (1 - score_alpha) * 3000
 #                score component      = score_improve * 0.01
 #                driver ratio         = driver_improve * 5.0
-#                per-gene driver bonus = 1.0
+#                per-gene driver bonus = train_label_bonus（默认 1.0，可配置）
 #                reward 截断到 [0, 5.0]
 #   learn:       reward 先除以 10.0 再作为 Q target
 class DeepQNetwork:
@@ -171,6 +171,7 @@ class DeepQNetwork:
             "lowfreq_bonus_cap": 0.20,
             "lowfreq_unlabeled_bonus_scale": 0.0,
             "lowfreq_unlabeled_bonus_cap": 0.0,
+            "train_label_bonus": 1.0,
         }
 
     @staticmethod
@@ -420,7 +421,7 @@ class DeepQNetwork:
         # ========== 4. 当前动作直接命中奖励 ==========
         selected_gene = list(gene_name)[action]
         is_train_driver = selected_gene in self.train_driver_set
-        driver_label_bonus = 1.0 if is_train_driver else 0.0
+        driver_label_bonus = self._reward_weight("train_label_bonus") if is_train_driver else 0.0
 
         if is_train_driver:
             pass
