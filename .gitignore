@@ -44,3 +44,6 @@ src/Ranking_List*.txt
 *.pt
 *.pth
 *.th
+
+# Local editor settings
+.vscode/
