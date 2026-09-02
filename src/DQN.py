@@ -9,6 +9,14 @@ from mutation_frequency import (
     classify_mutation_frequency,
     mutation_frequency_pct,
 )
+from rd_definitions import (
+    RD_EVIDENCE_CAP_DEFAULT,
+    RD_EVIDENCE_MIN_DEFAULT,
+    RD_EVIDENCE_SCALE_DEFAULT,
+    RD_REWARD_WEIGHT_DEFAULTS,
+    RD_W_DISCOVERY_DEFAULT,
+    RD_W_RECOVERY_DEFAULT,
+)
 
 
 # Legacy reward-scale magic numbers（改动会改变训练动态，务必先理解 reward 设计）：
@@ -18,7 +26,8 @@ from mutation_frequency import (
 #                driver ratio         = driver_improve * 5.0
 #                per-gene driver bonus = train_label_bonus（默认 1.0，可配置）
 #                reward 截断到 [0, 5.0]
-#   learn:       reward 先除以 10.0 再作为 Q target
+#   learn:       (修复 2026-09-01)reward 不再除以 10.0；此前该缩放使 reward 占 TD target <1%，
+#                TD 目标退化为 gamma*Q_next 的自洽平滑，奖励信号被淹没，详见 README「RL 学习回路审计」。
 class DeepQNetwork:
     def __init__(
             self,
@@ -102,6 +111,14 @@ class DeepQNetwork:
             raise ValueError(
                 f"{self.reward_mode} requires a frozen low-frequency evidence table."
             )
+        if (
+                self.reward_mode == "rd_scan"
+                and not self.lowfreq_evidence_by_gene
+        ):
+            raise ValueError(
+                "rd_scan requires a frozen low-frequency evidence table "
+                "(--lowfreq-evidence-path) for the discovery (evidenceV2) signal."
+            )
         T = 3
         ALPHA = 0.0001
         self.Q = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, net_ori)
@@ -160,7 +177,7 @@ class DeepQNetwork:
 
     @staticmethod
     def default_reward_weights():
-        return {
+        weights = {
             "multiomics_mutation_weight": 0.08,
             "multiomics_expression_weight": 0.06,
             "multiomics_methylation_weight": 0.06,
@@ -172,7 +189,13 @@ class DeepQNetwork:
             "lowfreq_unlabeled_bonus_scale": 0.0,
             "lowfreq_unlabeled_bonus_cap": 0.0,
             "train_label_bonus": 1.0,
+            "w_recovery": RD_W_RECOVERY_DEFAULT,
+            "w_discovery": RD_W_DISCOVERY_DEFAULT,
+            "rd_evidence_min": RD_EVIDENCE_MIN_DEFAULT,
+            "rd_evidence_scale": RD_EVIDENCE_SCALE_DEFAULT,
+            "rd_evidence_cap": RD_EVIDENCE_CAP_DEFAULT,
         }
+        return {**RD_REWARD_WEIGHT_DEFAULTS, **weights}
 
     @staticmethod
     def _clean_reward_gene(gene):
@@ -304,6 +327,32 @@ class DeepQNetwork:
                 components["reward_evidence_bonus"] = float(
                     np.clip(raw_bonus, 0.0, self._reward_weight("lowfreq_unlabeled_bonus_cap"))
                 )
+        elif mode == "rd_scan":
+            # 混合奖励：reward = w_recovery × recovery(legacy 恢复信号)
+            #            + w_discovery × discovery(低频新候选 evidenceV2 信号)。
+            # components 记录“加权贡献”，保证 sum(components)==raw_total 的审计成立：
+            #   reward_legacy/  reward_train_label  = w_recovery × legacy 原值
+            #   reward_evidence_bonus = w_discovery × discovery 原值
+            w_rec = self._reward_weight("w_recovery")
+            w_disc = self._reward_weight("w_discovery")
+            evidence = self._lowfreq_evidence_for_gene(selected_gene)
+            score = float(np.clip(float(evidence.get("LowFrequencyEvidenceScoreV2", 0.0)), 0.0, 1.0))
+            mutation_count = int(round(float(evidence.get("MutationPatientCount", 0.0))))
+            discovery_raw = 0.0
+            # discovery 门控（frozen-label：只用低频区 + 证据分 + 非 train driver，不读 val）
+            if (
+                    not is_train_driver
+                    and classify_mutation_frequency(mutation_count) == "low_frequency"
+                    and score >= self._reward_weight("rd_evidence_min")
+            ):
+                discovery_raw = float(np.clip(
+                    self._reward_weight("rd_evidence_scale") * score,
+                    0.0,
+                    self._reward_weight("rd_evidence_cap"),
+                ))
+            components["reward_legacy"] = float(w_rec * legacy_base)
+            components["reward_train_label"] = float(w_rec * train_label_bonus)
+            components["reward_evidence_bonus"] = float(w_disc * discovery_raw)
         else:
             raise ValueError(f"Unsupported reward_mode: {mode!r}")
 
@@ -529,7 +578,9 @@ class DeepQNetwork:
         state = torch.tensor(state, dtype=torch.float32).to(self.Q.device)
         action = torch.LongTensor(action).view(-1, 1).to(self.Q.device)
         reward_sum = torch.tensor(reward_sum, dtype=torch.float32).view(-1, 1).to(self.Q.device)
-        reward_sum = reward_sum / 10.0
+        # 修复(2026-09-01):不再除以 10.0。此前 reward/10 使 TD target 中 reward 占比极低
+        # (legacy 每步均值 0.012 → /10 后 0.0012,而 Q_next 约 1~5,reward 贡献 <1%),
+        # 目标几乎退化为 gamma*Q_next 的价值自洽,奖励信号被完全淹没。
         new_state = state.clone()
 
         action_index = torch.LongTensor(action_index).to(self.Q.device)

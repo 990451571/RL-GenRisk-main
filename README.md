@@ -122,3 +122,178 @@
   1. **贪心 rollout 顺序选择**（已记录于 AGENT_HANDOFF_REPORT §11.6）：当前评估是单遍「空上下文」打分排序，没用上模型的序列决策能力；改成「逐个选基因、已选基因不再重选」的顺序排序，可能更贴近 RL 本质。
   2. **特征/图判别力验证**：先确认静态特征本身能否把 driver 与普通基因区分开（如特征分布对比、简单监督基线），再谈 RL 改进。
   3. 若继续 RL 路线，优先解决**训练不稳定**（学习率、探索率、评估频率等）。
+
+---
+
+## RL 学习回路审计与修复（2026-09-01）
+
+本轮先停掉一切新方向（MORL / GRN / 新癌种 / 新低频奖励版本），只做两件事：
+① 审计并修复 RL 学习回路本身；② 用 legacy/recovery 目标验证修复是否有效。
+审计发现：**RL 学不进去的主要责任不在「奖励配方」，而在训练机制和目标错位。**
+以下是本轮确认的错误原因（按严重程度排列）：
+
+### 一、五个已确认的错误原因
+
+1. **reward 在 `learn()` 里又除以了 10，reward 在 TD 目标中占比极低。**
+   奖励本身已经很小（legacy 每步均值 ≈ 0.012），`learn()` 里又执行 `reward_sum = reward_sum / 10.0`，
+   使每步 reward 变成 ≈ 0.0012，而 `gamma × Q_next` 约在 1~5 的量级——**reward 对 TD target 的贡献 < 1%**，
+   目标函数退化为「让 Q 自洽地逼近 gamma×Q_next」的价值平滑，奖励信号被完全淹没，
+   agent 实际上不在学奖励，只是在自说自话。已删除该 `/10.0`（`src/DQN.py`）。
+
+2. **PER（优先级经验回放）参数设置使其近似均匀采样。**
+   `--per_alpha 0.2` 接近均匀；`--per_beta_frames 2,000,000` 远大于整个训练的学习步数（50 轮 × 150 步 ≈ 7,500），
+   beta 全程卡在 ≈0.1 不升——重要性采样权重形同虚设，高 TD 误差样本不被聚焦。已改为
+   `alpha=0.6`、`beta_frames` 自动取 `max_episodes × topk`（训练结束时 beta 恰好升到 1.0）（`src/train.py`）。
+
+3. **梯度长期被裁剪到 1.0。**
+   `--gradient_clip 1.0` 对约 16 万参数的网络（smooth_l1 损失下梯度范数天然在 13~236）而言，
+   是**每一步都满强度裁剪**，有效步长被压死到 `lr × 1.0`，网络基本不动。已改为 50.0（`src/train.py`）。
+
+4. **V2 奖励与突变频率强负相关，而三套 driver 标签全部集中在突变频率高百分位。**
+   Train(16)/Validation(25)/Test(18) 的突变频率百分位中位数分别为 **99.8% / 98.5% / 95.1%**
+   （相对 9039 个背景基因），VHL(0.462) 是全局最高突变基因；
+   而低频证据分 V2 与突变频率的 Spearman ≈ **−0.59**，三套标签的证据分均值只有 0.16~0.28（背景 0.50）。
+   **奖励在找「低突变新候选」，标签在评「高突变已知 driver」，两者方向相反。**
+
+5. **因此出现「模型 reward 上升、Validation NDCG 下降」——本质是「训练目标与评价目标冲突」。**
+   审计中 V2 的 episode_reward 确实在上升（agent 学到了东西），但 val_ndcg 塌到 0.00~0.05：
+   agent 在高效地优化一个与评价反着来的目标。这不是调 reward 配方能解决的，是任务定义与评估口径的问题。
+   —— 副产品：由于已知 driver 就是高突变基因，**单按突变频率静态排序就能命中 13/25 验证 driver**，
+   这是标签偏置的镜像，不是生物学信号；也是当前所有学习路线（RL / 监督）都难以企及的墙。
+
+### 二、已做的修复（只动已确认问题，不新增模块）
+
+| 项 | 修复前 | 修复后 | 位置 |
+|---|---|---|---|
+| reward 缩放 | `learn()` 内再 `/10.0` | 不再缩放 | `src/DQN.py` |
+| PER alpha | 0.2（≈均匀） | 0.6 | `src/train.py` |
+| PER beta 周期 | 2,000,000（beta 卡 0.1） | 自动 = `max_episodes×topk` | `src/train.py` |
+| 梯度裁剪 | 1.0（全程强裁） | 50.0 | `src/train.py` |
+| epsilon 下限 | 0.15（每轮约 22 个随机动作） | 0.05 | `src/train.py` |
+
+### 三、修复验证（训练前 vs 训练后）
+
+- 训练：`bash scripts/run_mechanism_fix_validation.sh`（legacy × seed 42/43/44，
+  新默认机制参数，输出到 `outputs/fix_legacy_seed*/`；**正式训练请用户手动运行**）。
+- 评估：脚本会接着跑 `evaluate_greedy_rollout.py`（NDCG@150 / Recall@150 / HitCount@150）
+  与 `scripts/compare_prepost_fix.py`（Top-150 重合 + Spearman 秩相关）。
+- 判读口径（写死在 `compare_prepost_fix.py` 里）：
+  - 修复有效：NDCG/Recall 明显上升，同时 top-150 重合率下降、rank corr 明显 < 1 → 训练真的在改排序，且方向与评价一致；
+  - 修复无效：前后几乎不动、top-150 重合≈150、rank corr≈1 → 学到 = 没学；
+  - 病态：NDCG 下降但 reward 上升 → 训练目标仍与评价目标冲突（回到本审计第 4、5 条）。
+- 对照基准（修复前的旧 legacy 三种子，`outputs/rollout_eval/prepost_OLD_legacy_baseline.csv`）：
+  训练前后 NDCG 涨跌靠运气（+0.048→0.061 / +0.056→0.126 / −0.104→0.079），
+  seed43 排名被彻底打乱（Spearman −0.616）、seed44 反而下降——训练不稳定、且对评价的提升不可复现。
+
+### 四、下一步决策门
+
+- 修复后 legacy 训练若**明显改善**（见上）→ 恢复 Recovery–Discovery 权重扫描，回到 MORL 主线；
+- 若仍**无明显改善** → 暂停 MORL。考虑到第 1 条（静态突变排序即 13 命中的墙）与第 4、5 条（目标错位），
+  更可能的结论是需要**重新定义任务**：要么接受「恢复已知 driver」以静态基线为准，要么为「发现低频新候选」
+  另立评价协议（低频标签或外部验证），而不是继续调 RL。
+
+### 五、修复验证结果（2026-09-02，正式训练 3 种子已完成）
+
+机制修复验证 **2/3 种子明显有效**。训练前 → 训练后（best checkpoint，一次性/rollout 取较高）：
+
+| 种子 | NDCG@150 前→后 | Recall 前→后 | Hits 前→后 | top150 重合 | Spearman |
+|---|---|---|---|---|---|
+| 42 | 0.048 → **0.171/0.185** | 0.04 → **0.32/0.36** | 1 → **8/9** | 32/150 | −0.37 |
+| 43 | 0.056 → **0.188/0.140** | 0.12 → **0.36/0.28** | 3 → **9/7** | 91/150 | +0.29 |
+| 44 | 0.104 → **0.083/0.057** | 0.20 → 0.12 | 5 → 3 | 22/150 | −0.68 |
+| 均值 | → **0.147** | → **0.27** | → **7.0** | 48/150 | −0.25 |
+
+**结论一：修复有效，机制问题确实是主因。** 对比修复前旧 legacy（同 seed）：平均命中从 **3.0 → 7.0**、
+平均 NDCG 从 **0.090 → 0.147**；seed42/43 各命中 9 个验证 driver、NDCG 0.17~0.19，**打破 RL 历史纪录（旧最好 7 个/0.139）**，
+并且**已反超同架构监督 GCN（7~8 个）**。训练前后排序被实质改写（Spearman 远离 1、top150 重合平均仅 48/150），
+证明去掉 reward/10 + PER/裁剪/epsilon 修复后，reward 信号真正开始驱动学习。
+
+**结论二：仍有三道硬伤，未过"超过静态基线"这一关。**
+1. **仍落后静态突变基线**：最好命中 9 < 静态突变 13（NDCG 0.188 < 0.283）——标签偏置的墙依然在；
+2. **种子不稳定**：seed44 训练后反而倒退（5→3 命中），种子间方差依旧很大；
+3. **best checkpoint 都落在第 1~3 轮，之后 NDCG 衰减到 0.04~0.06**，而 reward 持续走高（~27 不再涨但 NDCG 不跟）——
+   证明 reward 与评价目标**部分对齐但未完全**：早期训练（前几轮）学对了方向，继续训练后 reward 驱动又把它拉歪，
+   是审计第 4、5 条（目标冲突）在更小尺度上的残留。这也解释了为什么"每轮验证、取 best"才能保住好结果。
+
+**下一步选项（待用户定夺，见对话）**：
+- 选项 A：按本轮指令"明显改善"达标 → 恢复 **Recovery–Discovery 权重扫描**，测试能否稳定种子 + 抵消目标冲突；
+- 选项 B：考虑到"仍未超过静态突变基线 + 种子不稳定 + best 只在前 3 轮"这三条 → **重新定义任务**优先。
+- 选项 C：先修 reward-评价对齐（如把 train_label_bonus 做成主要信号 / 显式奖励"排进 top-k 的已知 driver"），再回头扫描。
+
+## 修复第二阶段：多 seed 稳定性验证（2026-09-02）
+
+用户决定（约束条件）：
+- 当前修复机制**原样不动**，补跑 seed 45-49（机制参数与 42/43/44 完全一致）；
+- 不改 reward 内容、不做 MORL / GRN / 新癌种；
+- 只允许调 lr / epsilon 衰减 / 更新频率等稳定参数（**禁止**新增「Train driver 进 Top-K」奖励，避免进一步过拟合 16 个训练标签）；
+- 不要求 RL 必须超过突变频率 baseline（突变只作 Recovery 强基线），最终目标仍是 Recovery–Discovery trade-off；
+- 若 5 seed 下修复可重复且 reward 稳定改变排序 → 进 Recovery–Discovery 权重扫描；否则继续定位训练稳定性/泛化。
+
+**8 seed（42–49）验证已完成**（`outputs/fix_all_rollout_eval/`：stability_curves.csv / pre_best_last_compare.csv；
+汇总脚本 `scripts/analyze_stability_fix.py`）。机制与第一阶段完全一致，仅换 seed。
+
+每 seed 曲线证据（`train_metrics.csv`）：
+
+| seed | 峰值轮 | best NDCG | 末轮 NDCG | 峰值后跌 | reward 持续走高 | 说明 |
+|---|---|---|---|---|---|---|
+| 42 | 3 | 0.171 | 0.044 | 74% | ✓ | 前3轮见顶 |
+| 43 | 1 | 0.188 | 0.053 | 72% | ✓ | 前3轮见顶 |
+| 44 | 2 | 0.083 | 0.048 | 42% | ✓ | 前3轮见顶 |
+| 45 | 1 | 0.182 | 0.053 | 71% | ✓ | 前3轮见顶 |
+| 46 | 4 | **0.211** | 0.048 | 78% | ✓ | 见顶略晚，命中10 历史最高 |
+| 47 | 43 | 0.072 | 0.056 | 22% | ✓ | **例外：从未冲高（dud）** |
+| 48 | 3 | 0.191 | 0.044 | 77% | ✓ | 前3轮见顶 |
+| 49 | 2 | 0.131 | 0.053 | 60% | ✓ | 前3轮见顶 |
+| 均值 | 中位 2.5 | 0.154 | 0.050 | −62% | 8/8 | — |
+
+三时点一次性评估（8 seed 平均）：NDCG pre 0.058 → **best 0.154** → last 0.050；
+Recall 0.08 → **0.28** → 0.045；命中 pre 2.0 → **best 7.0** → last 1.1；
+best↔last 的 top150 重合平均 46/150、Spearman −0.22 —— **best 和 last 基本是两个不相干的模型**。
+
+**结论（8 seed 正式判定）**：
+1. **「前 1-3 轮见顶、reward 走高而 NDCG 掉」是稳定主模式**：6/8 严格前 3 轮见顶，加 seed46（第 4 轮）
+   = 7/8 极早期见顶；唯一例外是 seed47（dud，全程未冲高，~1/8 dud 率）。继续训练会毁掉早期好排序，
+   提升只活在 best checkpoint —— 训练目标与评价目标部分冲突（审计第 5 条残留）在 8 seed 下稳定复现，
+   **过拟合 16 个训练标签（train_label_bonus）是最可能病灶**。
+2. **修复可重复性达标**：训练前 → best NDCG 平均 **+0.096**（8 seed 中 7 个为正）、命中 2.0→7.0、
+   reward 8/8 稳定改写排序 → **按用户门槛可进入 Recovery–Discovery 权重扫描**。
+3. **仍落后静态突变基线**（best 命中 7.0 < 突变 13、NDCG 0.154 < 0.283）：突变只作 Recovery 基线，
+   目标仍是 Recovery–Discovery trade-off，不要求必超。
+4. **风险提示**：best 状态只活在前 1-4 轮；每配置应多 seed 取稳健结论以对冲 1/8 dud；
+   train_label_bonus 旋钮恰在权重扫描调节范围内，正式扫描前值得先小试降权以确认崩塌元凶。
+
+**状态（2026-09-02）**：已整理 8 seed 数据供用户 review（`outputs/fix_all_rollout_eval/`），
+下一步（权重扫描 / 稳定性探针）待用户定夺。
+
+---
+
+## Recovery–Discovery 权重探针（2026-09-02，代码就绪，待正式运行）
+
+用户最终裁定（最小方案）：固定当前已修复 RL 机制、**不再改 reward 结构**；
+保留 legacy recovery 信号 + 启用 evidenceV2 discovery 信号，新增
+`reward = w_recovery × recovery + w_discovery × discovery`，
+测 **(1,0)/(0.8,0.2)/(0.5,0.5)/(0.2,0.8)/(0,1)** 五组权重 × **3 seed** × **10 轮**。
+
+**Discovery 目标先定义为「低频新候选」，不把全部低频基因算 discovery**：
+- 低频区 = 突变患者数 **2–18**；
+- **LowFreqNovel@150** = top-150 ∩（低频区 且 ∉ train∪val 已知 driver）→ 共 **2419** 个；
+- **EvidenceSupportedLowFreqNovel@150** = 上述且 `LowFrequencyEvidenceScoreV2 ≥ 0.5`（低频 novel 的顶部 ~10%）→ 共 **224** 个；
+- reward 侧 discovery 门控（frozen-label，不读 val）：低频区 + evidence≥0.5 + 非 train driver。
+
+共享定义在 `src/rd_definitions.py`（reward 侧与评估侧同源）；判定标准：五组权重下
+Recovery 指标（NDCG@150/Recall@150）随 w_discovery 升高而**一致下降**、
+Discovery 两指标**一致上升**（3 seed 符号一致）→ 进 preference-conditioned MORL，否则暂停重新定义。
+
+**实现 + 冒烟已通过**（未污染正式产物）：
+- `src/DQN.py` 新增 `rd_scan` 模式；`src/train.py` 新增 `--w-recovery/--w-discovery/--rd-evidence-*`；
+- `scripts/evaluate_greedy_rollout.py` 新增 LowFreqNovel@150 / EvidenceSupportedLowFreqNovel@150 两列；
+- 冒烟：rd_scan(1,0) 与 legacy 逐轮 reward/NDCG **完全一致（差值 0）**；rd_scan(0,1) 只从 supported
+  低频新候选拿分、train/val driver 零污染；候选集计数 2419/224 与设计一致。
+
+**正式训练由用户手动运行**（GPU 约 3–4 小时，建议后台/过夜）：
+```bash
+nohup bash scripts/run_rd_probe.sh > outputs/rdprobe.log 2>&1 &
+```
+产物：`outputs/rdprobe_r*_seed{42..44}/`（15 个 run，每轮 train_metrics.csv）、
+`outputs/rdprobe_eval/`（summary_metrics.csv 含四指标、rankings/、
+`rd_probe_group_summary.csv` mean±SD、`rd_probe_direction.csv` 方向性 + 判定）。

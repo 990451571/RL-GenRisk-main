@@ -82,7 +82,9 @@ REWARD_MODES = [
     "lowfreq_unlabeled_no_network",
     "lowfreq_unlabeled_no_omics",
     "lowfreq_unlabeled_no_rarity",
+    "rd_scan",  # 探针(2026-09-02): reward = w_recovery×recovery + w_discovery×discovery
 ]
+RD_SCAN_REWARD_MODES = {"rd_scan"}
 LOWFREQ_UNLABELED_REWARD_MODES = {
     "lowfreq_unlabeled_evidence",
     "lowfreq_unlabeled_evidence_v2",
@@ -285,6 +287,13 @@ def ensure_existing_label_path(path, label_name):
     return resolved
 
 
+def _per_beta_frames_arg(s: str):
+    """--per_beta_frames 类型函数：接受整数或 auto/None（= 自动匹配训练长度）。"""
+    if isinstance(s, str) and s.strip().lower() in ("auto", "none"):
+        return None
+    return int(s)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="仅使用固定 hybrid6_raw 特征模式训练 RL-GenRisk。"
@@ -328,11 +337,12 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="学习率。")
     parser.add_argument("--tau", type=float, default=0.001, help="目标网络软更新系数 tau。")
     parser.add_argument("--epsilon_start", type=float, default=1.0, help="初始随机探索概率。")
-    parser.add_argument("--epsilon_end", type=float, default=0.15, help="最低随机探索概率。")
+    parser.add_argument("--epsilon_end", type=float, default=0.05, help="最低随机探索概率。修复(2026-09-01):0.15→0.05,原来每轮约 22 个随机动作。")
     parser.add_argument("--epsilon_decay", type=float, default=600.0, help="按全局步数计算的 epsilon 衰减尺度。")
-    parser.add_argument("--per_alpha", type=float, default=0.2, help="PER 优先级指数 alpha。")
+    parser.add_argument("--per_alpha", type=float, default=0.6, help="PER 优先级指数 alpha。修复(2026-09-01):0.2→0.6,原值接近均匀采样。")
     parser.add_argument("--per_beta_start", type=float, default=0.1, help="PER 重要性采样权重 beta 初始值。")
-    parser.add_argument("--per_beta_frames", type=int, default=2_000_000, help="beta 递增到 1.0 所需的采样次数。")
+    parser.add_argument("--per_beta_frames", type=_per_beta_frames_arg, default=None,
+                        help="beta 递增到 1.0 所需的采样次数；默认 auto(None)=自动取 max_episodes×topk(修复 2026-09-01:原 2e6 远超训练步数,beta 卡在 0.1)。")
     parser.add_argument("--per_eps", type=float, default=1e-5, help="PER priority 的最小稳定项。")
     parser.add_argument("--val_interval", type=int, default=1, help="每隔多少轮执行一次验证。")
     parser.add_argument("--topk", type=int, default=150, help="每轮选择预算及主要评价 K 值。")
@@ -341,7 +351,7 @@ def parse_args():
     parser.add_argument("--cancer", default="KIRC", help="癌种名称，默认 KIRC。")
     parser.add_argument("--embedding_size", type=int, default=64, help="图节点嵌入维度。")
     parser.add_argument("--score_alpha", type=float, default=0.5, help="奖励函数中权重得分与患者覆盖得分的平衡系数。")
-    parser.add_argument("--gradient_clip", type=float, default=1.0, help="梯度范数裁剪阈值。")
+    parser.add_argument("--gradient_clip", type=float, default=50.0, help="梯度范数裁剪阈值。修复(2026-09-01):1.0→50.0,原值对 ~16 万参数网络(smooth_l1 下范数天然 13~236)全程强裁,有效步长被压到 lr×1。")
     parser.add_argument("--reward-mode", choices=REWARD_MODES, default="legacy", help="Stage 2 reward mode；默认 legacy 以保持兼容。")
     parser.add_argument("--multiomics-mutation-weight", type=float, default=0.08, help="multiomics_mutation 模式下 Mutation 辅助 reward 权重。")
     parser.add_argument("--multiomics-expression-weight", type=float, default=0.06, help="multiomics_mutation 模式下 Expression 辅助 reward 权重。")
@@ -355,6 +365,11 @@ def parse_args():
     parser.add_argument("--lowfreq-unlabeled-bonus-scale", type=float, default=None, help="Frozen lowfreq_unlabeled_* evidence bonus scale.")
     parser.add_argument("--lowfreq-unlabeled-bonus-cap", type=float, default=None, help="Frozen lowfreq_unlabeled_* evidence bonus cap.")
     parser.add_argument("--train-label-bonus", type=float, default=1.0, help="选中 train driver 基因时的直接命中奖励（默认 1.0；设 0 则去掉，0.5 则减半）。")
+    parser.add_argument("--w-recovery", type=float, default=1.0, help="rd_scan: recovery 信号(legacy)权重 w_rec。")
+    parser.add_argument("--w-discovery", type=float, default=1.0, help="rd_scan: discovery 信号(低频新候选 evidenceV2)权重 w_disc。")
+    parser.add_argument("--rd-evidence-min", type=float, default=0.5, help="rd_scan: discovery 门控——低频新候选的 LowFrequencyEvidenceScoreV2 最低阈值(默认 0.5)。")
+    parser.add_argument("--rd-evidence-scale", type=float, default=2.0, help="rd_scan: discovery bonus = scale×evidenceV2 score(默认 2.0，使 supported 新候选单步≈1.0-1.2)。")
+    parser.add_argument("--rd-evidence-cap", type=float, default=5.0, help="rd_scan: discovery bonus 单步上限(默认 5.0，与总 reward 截断一致)。")
     return parser.parse_args()
 
 
@@ -407,6 +422,23 @@ def validate_training_args(args):
         reward_weights["lowfreq_unlabeled_bonus_scale"] = args.lowfreq_unlabeled_bonus_scale
     if args.lowfreq_unlabeled_bonus_cap is not None:
         reward_weights["lowfreq_unlabeled_bonus_cap"] = args.lowfreq_unlabeled_bonus_cap
+    if args.reward_mode in RD_SCAN_REWARD_MODES:
+        reward_weights.update({
+            "w_recovery": args.w_recovery,
+            "w_discovery": args.w_discovery,
+            "rd_evidence_min": args.rd_evidence_min,
+            "rd_evidence_scale": args.rd_evidence_scale,
+            "rd_evidence_cap": args.rd_evidence_cap,
+        })
+        if not 0.0 <= args.rd_evidence_min <= 1.0:
+            raise ValueError(f"--rd-evidence-min 必须在 [0,1]，当前 {args.rd_evidence_min}。")
+        if args.w_recovery <= 0 and args.w_discovery <= 0:
+            raise ValueError("rd_scan 至少一个权重须为正(--w-recovery/--w-discovery)。")
+        if not args.lowfreq_evidence_path:
+            raise ValueError("rd_scan requires --lowfreq-evidence-path (frozen evidenceV2 discovery 信号)。")
+        evidence_path = resolve_path(args.lowfreq_evidence_path, base=REPO_DIR)
+        if not evidence_path.exists():
+            raise FileNotFoundError(f"low-frequency evidence table not found: {evidence_path}")
     for name, value in reward_weights.items():
         if not np.isfinite(value) or value < 0:
             raise ValueError(f"reward weight {name} must be finite and non-negative, got {value}.")
@@ -721,6 +753,14 @@ def build_agent(args, env, device):
         reward_weights["lowfreq_unlabeled_bonus_scale"] = args.lowfreq_unlabeled_bonus_scale
     if args.lowfreq_unlabeled_bonus_cap is not None:
         reward_weights["lowfreq_unlabeled_bonus_cap"] = args.lowfreq_unlabeled_bonus_cap
+    if args.reward_mode in RD_SCAN_REWARD_MODES:
+        reward_weights.update({
+            "w_recovery": args.w_recovery,
+            "w_discovery": args.w_discovery,
+            "rd_evidence_min": args.rd_evidence_min,
+            "rd_evidence_scale": args.rd_evidence_scale,
+            "rd_evidence_cap": args.rd_evidence_cap,
+        })
     evidence_by_gene = None
     if args.lowfreq_evidence_path:
         evidence_by_gene = lowfreq_evidence.load_evidence_by_gene(
@@ -764,7 +804,12 @@ def build_agent(args, env, device):
         group["lr"] = args.learning_rate
     agent.memory.alpha = args.per_alpha
     agent.memory.beta_start = args.per_beta_start
-    agent.memory.beta_frames = args.per_beta_frames
+    if args.per_beta_frames is None:
+        # 修复(2026-09-01):beta 退火周期自动匹配训练长度(max_episodes×topk≈学习步数),
+        # 使 beta 在训练结束时到 1.0,而非停留在 0.1。
+        agent.memory.beta_frames = int(max(1000, args.max_episodes * args.topk))
+    else:
+        agent.memory.beta_frames = args.per_beta_frames
     agent.memory.eps = args.per_eps
     expected_feature_dim = int(env["feature_report"]["feature_dim"])
     if agent.feature_dim != expected_feature_dim:
