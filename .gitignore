@@ -47,3 +47,7 @@ src/Ranking_List*.txt
 
 # Local editor settings
 .vscode/
+
+# Microsoft Office / WPS temporary lock files
+~$*
+**/~$*

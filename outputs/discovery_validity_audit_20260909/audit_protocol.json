@@ -1,0 +1,53 @@
+{
+  "protocol_version": "discovery_validity_audit_v1",
+  "protocol_frozen_date": "2026-09-09",
+  "candidate_freeze_manifest": "outputs/discovery_validity_audit_20260909/frozen_candidates/freeze_manifest.json",
+  "selection_rule": "No model, checkpoint, preference profile, seed, or candidate may be changed after external-evidence access.",
+  "model_scope": "latest dual-head preference-conditioned contextual bandit",
+  "bandit_seeds": [42, 45, 48],
+  "frozen_preferences": [
+    {"profile": "recovery_heavy", "w_recovery": 0.8, "w_discovery": 0.2},
+    {"profile": "compromise", "w_recovery": 0.5, "w_discovery": 0.5},
+    {"profile": "discovery_heavy", "w_recovery": 0.2, "w_discovery": 0.8}
+  ],
+  "top_k_values": [50, 100, 150],
+  "low_frequency_novel_definition": "MutationPatientCount between 2 and 18 inclusive and Gene not in Train union Validation labels.",
+  "internal_evidence_is_outcome": false,
+  "internal_evidence_role": "EvidenceScore ranking baseline and confounding/correlation audit only.",
+  "external_evidence_definitions": {
+    "frozen_literature_holdout": "Membership in the pre-existing 16-gene rare RCC holdout frozen on 2026-07-16.",
+    "cptac_recurrence": "At least 2 mutated tumors in the independent CPTAC ccRCC cohort.",
+    "cptac_protein_support": "At least 20 matched tumor-normal pairs, absolute median paired protein-abundance difference >= 1 log2 unit, and two-sided paired Wilcoxon BH-FDR < 0.05.",
+    "depmap_ccrcc_dependency": "At least 5 measured ccRCC models and median Chronos gene effect <= -0.5.",
+    "depmap_ccrcc_selective_dependency": "DepMap ccRCC dependency plus non-kidney median minus ccRCC median >= 0.25.",
+    "independent_any_hit": "Frozen literature holdout OR CPTAC recurrence OR CPTAC protein support OR DepMap ccRCC selective dependency.",
+    "independent_strong_hit": "At least two of the four independent evidence classes above."
+  },
+  "baseline_definitions": {
+    "EvidenceScore": "LowFrequencyEvidenceScoreV2 descending; internal/oracle-like baseline, never an external outcome.",
+    "mutation": "MutationFrequency descending.",
+    "PPI_degree": "HPRD Degree descending.",
+    "GRN_degree": "GRN total degree descending; post-hoc confounder, not an input to the latest bandit.",
+    "MLP_GCN": "Existing fixed final rankings; no retraining. Seeds 42/45/46.",
+    "bandit": "Frozen greedy-rollout Top-150 for seeds 42/45/48 and three fixed profiles."
+  },
+  "primary_metrics": [
+    "candidate-pool-restricted Top-K low-frequency independent-evidence hit rate at K",
+    "fold enrichment versus the low-frequency novel pool",
+    "mean pairwise Top-K Jaccard across seeds"
+  ],
+  "ranking_scopes": {
+    "primary": "Restrict every full ranking to the same low-frequency novel pool, then take K. This gives every method exactly K candidates.",
+    "secondary": "Take the global Top-K first and then retain low-frequency novel genes. This matches the historical Discovery metric but can unfairly penalize mutation ranking because high-frequency genes consume slots."
+  },
+  "comparison_rule": "Bandit is retained only if the conclusion is stable across its three seeds and it exceeds the direct EvidenceScore and degree baselines; unmatched 3-seed comparisons with MLP/GCN are descriptive, with paired seed comparison restricted to 42 and 45.",
+  "simple_reordering_diagnostic": {
+    "high_full_rank_similarity": "absolute Spearman rho >= 0.80",
+    "high_top150_overlap": "Top-150 Jaccard >= 0.67",
+    "interpretation": "Heuristic diagnostic only, not a statistical proof of identity."
+  },
+  "test_labels_read": false,
+  "reward_changed": false,
+  "model_changed": false,
+  "new_seed_added": false
+}

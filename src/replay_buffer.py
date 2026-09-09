@@ -4,10 +4,12 @@ The node feature matrix is static across the whole training run, while the
 action mask changes after selecting a gene.  The static state is therefore
 stored once; each transition stores:
 
-    (action, reward, current_action_mask, next_action_mask, done)
+    (action, reward, true_current_mask, true_next_mask, history_current_mask,
+     history_next_mask, done, preference)
 
-The public method names and sample_buffer() return order remain compatible with
-DQN.py.
+The public method names remain compatible with DQN.py.  ``sample_buffer`` also
+returns a final preference batch; for ordinary scalar runs it has shape
+``(batch_size, 0)`` and is ignored by DQN.
 """
 
 from __future__ import annotations
@@ -27,10 +29,16 @@ class PrioritizedReplayBuffer:
         beta_start=0.1,
         beta_frames=2_000_000,
         eps=1e-5,
+        preference_dim=0,
+        reward_dim=1,
     ):
         self.mem_size = self._validate_positive_int("max_size", max_size)
         self.n_actions = self._validate_positive_int("n_actions", n_actions)
         self.feature_dim = self._validate_positive_int("feature_dim", feature_dim)
+        self.preference_dim = int(preference_dim)
+        if self.preference_dim < 0:
+            raise ValueError(f"preference_dim must be non-negative, got {preference_dim!r}")
+        self.reward_dim = self._validate_positive_int("reward_dim", reward_dim)
 
         self.alpha = self._validate_unit_interval("alpha", alpha, include_zero=True)
         self.beta_start = self._validate_unit_interval(
@@ -51,7 +59,7 @@ class PrioritizedReplayBuffer:
             dtype=np.float32,
         )
         self.memory_a = np.zeros((self.mem_size, 1), dtype=np.int64)
-        self.memory_r = np.zeros((self.mem_size, 1), dtype=np.float32)
+        self.memory_r = np.zeros((self.mem_size, self.reward_dim), dtype=np.float32)
 
         # Mask before action: 1=selectable, 0=unavailable/already selected.
         self.memory_ai = np.zeros(
@@ -64,7 +72,19 @@ class PrioritizedReplayBuffer:
             (self.mem_size, self.n_actions),
             dtype=np.float32,
         )
+        # Context masks visible to Q_Fun.  In normal DDQN they exactly equal
+        # the true masks above.  History ablations can replace only these
+        # arrays while action legality and rewards still use memory_ai/sa.
+        self.memory_history_ai = np.zeros(
+            (self.mem_size, self.n_actions),
+            dtype=np.float32,
+        )
+        self.memory_history_sa = np.zeros(
+            (self.mem_size, self.n_actions),
+            dtype=np.float32,
+        )
         self.memory_done = np.zeros((self.mem_size, 1), dtype=np.float32)
+        self.memory_preference = np.zeros((self.mem_size, self.preference_dim), dtype=np.float32)
         self.priorities = np.zeros((self.mem_size,), dtype=np.float32)
 
     @staticmethod
@@ -116,6 +136,9 @@ class PrioritizedReplayBuffer:
         action_index,
         sel_action,
         done=False,
+        preference=None,
+        history_mask=None,
+        next_history_mask=None,
     ):
         """Store one transition.
 
@@ -136,12 +159,22 @@ class PrioritizedReplayBuffer:
                 f"action must be in [0, {self.n_actions - 1}], got {action_value}."
             )
 
-        reward_value = float(np.asarray(reward).reshape(-1)[0])
-        if not np.isfinite(reward_value):
-            raise ValueError(f"reward must be finite, got {reward!r}")
+        reward_value = np.asarray(reward, dtype=np.float32).reshape(-1)
+        if reward_value.shape != (self.reward_dim,) or not np.isfinite(reward_value).all():
+            raise ValueError(
+                f"reward must be a finite vector with shape ({self.reward_dim},), got {reward_value.shape}."
+            )
 
         current_action_mask = self._validate_mask("action_index", action_index)
         next_action_mask = self._validate_mask("sel_action", sel_action)
+        # Defaults preserve the exact legacy/full-history behavior for all
+        # existing callers, including synthetic diagnostics.
+        history_current_mask = self._validate_mask(
+            "history_mask", current_action_mask if history_mask is None else history_mask
+        )
+        history_next_mask = self._validate_mask(
+            "next_history_mask", next_action_mask if next_history_mask is None else next_history_mask
+        )
 
         if current_action_mask[action_value] != 1.0:
             raise ValueError(
@@ -157,15 +190,28 @@ class PrioritizedReplayBuffer:
         done_value = float(done)
         if done_value not in (0.0, 1.0):
             raise ValueError(f"done must be 0/1 or bool, got {done!r}")
+        if self.preference_dim:
+            preference_value = self._as_finite_array(
+                "preference", preference, np.float32, (self.preference_dim,)
+            )
+        elif preference is not None:
+            preference_value = np.asarray(preference, dtype=np.float32).reshape(-1)
+            if preference_value.size:
+                raise ValueError("preference was provided but preference_dim is 0.")
+            preference_value = preference_value
 
         index = self.mem_cntr % self.mem_size
         # 状态（节点特征矩阵）在训练中恒定，只存一份副本即可（copy 防止与外部特征矩阵互为别名）。
         self.state_s = state.copy()
         self.memory_a[index, 0] = action_value
-        self.memory_r[index, 0] = reward_value
+        self.memory_r[index] = reward_value
         self.memory_ai[index] = current_action_mask
         self.memory_sa[index] = next_action_mask
+        self.memory_history_ai[index] = history_current_mask
+        self.memory_history_sa[index] = history_next_mask
         self.memory_done[index, 0] = done_value
+        if self.preference_dim:
+            self.memory_preference[index] = preference_value
 
         current_size = min(self.mem_cntr, self.mem_size)
         if current_size > 0:
@@ -241,7 +287,10 @@ class PrioritizedReplayBuffer:
         batch_r = self.memory_r[sample_indices].copy()
         batch_current_mask = self.memory_ai[sample_indices].copy()
         batch_next_mask = self.memory_sa[sample_indices].copy()
+        batch_history_current_mask = self.memory_history_ai[sample_indices].copy()
+        batch_history_next_mask = self.memory_history_sa[sample_indices].copy()
         batch_done = self.memory_done[sample_indices].copy()
+        batch_preference = self.memory_preference[sample_indices].copy()
 
         return (
             batch_s,
@@ -249,9 +298,12 @@ class PrioritizedReplayBuffer:
             batch_r,
             batch_current_mask,
             batch_next_mask,
+            batch_history_current_mask,
+            batch_history_next_mask,
             batch_done,
             sample_indices,
             importance_weights,
+            batch_preference,
         )
 
     def update_priorities(self, indices, td_errors):
@@ -290,6 +342,7 @@ class PrioritizedReplayBuffer:
         self.memory_ai.fill(0.0)
         self.memory_sa.fill(0.0)
         self.memory_done.fill(0.0)
+        self.memory_preference.fill(0.0)
         self.priorities.fill(0.0)
         self.mem_cntr = 0
         self.sample_step = 0

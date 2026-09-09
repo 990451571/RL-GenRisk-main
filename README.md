@@ -297,3 +297,301 @@ nohup bash scripts/run_rd_probe.sh > outputs/rdprobe.log 2>&1 &
 产物：`outputs/rdprobe_r*_seed{42..44}/`（15 个 run，每轮 train_metrics.csv）、
 `outputs/rdprobe_eval/`（summary_metrics.csv 含四指标、rankings/、
 `rd_probe_group_summary.csv` mean±SD、`rd_probe_direction.csv` 方向性 + 判定）。
+
+---
+
+## Recovery–Discovery 权重探针：rollout 主评价重评（2026-09-03）
+
+### 一、评价口径变更及原因
+
+15 个既有 run 均已完成，本轮**没有重新训练**其中任何一个。此前的主结果以空上下文的 one-pass Q
+ranking 选择 checkpoint；但 one-pass 的 top-150 与序列 greedy rollout 经常不一致，前者不能充分评价
+RL 的序列决策策略。因此从本轮起：
+
+- **greedy rollout 是 RL 的主评价与 checkpoint 选择口径**；one-pass Q ranking 仅保留为辅助诊断；
+- Recovery：`NDCG@150`、`Recall@150`；
+- Discovery：`HighEvidenceLowFreqNovel@150`、`DiscoveryPrecision@150`
+  （高证据低频新候选 / 低频新候选）和 `DiscoveryFoldEnrichment@150`
+  （该 precision 相对候选池内高证据比例的倍数）；
+- 静态 mutation、degree、evidenceV2 基线用相同 Discovery 指标比较。
+
+低频新候选池为 2,419 个，其中高证据候选 224 个，故候选池高证据基线比例为
+`224 / 2419 = 9.26%`，fold enrichment 为 1 表示与候选池随机组成相同。
+
+**既有 checkpoint 限制**：旧训练只保存了 `checkpoint_best.pt`（按旧 one-pass 口径选出）与
+`checkpoint_last.pt`，没有逐 episode checkpoint。因而本次只能在这两份**已保留 checkpoint**中按 rollout
+Recovery NDCG 选择主 checkpoint（15 个 run 中 6 个选 best、9 个选 last），不能把它表述为完整的逐轮
+rollout early stopping。后续新训练应逐轮保存 checkpoint，并直接按 rollout 选择。
+
+### 二、rollout 主口径结果（3 seed 均值±SD）
+
+| (w_recovery, w_discovery) | NDCG@150 | Recall@150 | 高证据低频新候选 | Discovery Precision | Fold enrichment |
+|---|---:|---:|---:|---:|---:|
+| (1.0, 0.0) | 0.2231±0.0126 | 0.4267±0.0231 | 6.00±2.00 | 5.40%±2.13% | 0.58±0.23 |
+| (0.8, 0.2) | 0.2010±0.0571 | 0.3867±0.1007 | 5.00±1.00 | 4.42%±0.97% | 0.48±0.10 |
+| (0.5, 0.5) | 0.1853±0.0686 | 0.3467±0.1155 | 6.67±4.04 | 6.62%±4.84% | 0.71±0.52 |
+| (0.2, 0.8) | 0.1397±0.0235 | 0.2533±0.0231 | 5.67±3.06 | 6.18%±4.16% | 0.67±0.45 |
+| (0.0, 1.0) | 0.0667±0.0237 | 0.0800±0.0693 | 10.00±2.65 | 19.44%±4.05% | 2.10±0.44 |
+
+方向性检验采用每个 seed 内 5 个权重的 Spearman 相关：
+
+- Recovery 随 `w_discovery` 上升稳定下降：NDCG 总体 ρ=−0.775、每 seed 为
+  −0.90/−0.90/−0.60；Recall 总体 ρ=−0.830、每 seed 为 −0.97/−0.97/−0.67；
+- Discovery Precision / Fold enrichment 稳定上升：两者总体 ρ=+0.551、每 seed
+  为 +0.80/+0.15/+0.80；
+- 高证据低频新候选数从端点均值 6.0 增至 10.0（总体 ρ=+0.374，三 seed 均为正）；
+- 宽泛的低频新候选总数从 113 降至 53，这是较高 discovery 权重筛向高证据子集的预期组成变化，
+  不再作为 Discovery 主优化指标。
+
+因此，按照本轮预注册的 rollout 主口径，**3 个 seed 的 Recovery–Discovery 方向性一致，探针达到了进入
+preference-conditioned MORL 的资格条件**；本轮本身没有启动 MORL 训练。
+
+### 三、静态基线与边界
+
+| 方法 | NDCG@150 | Recall@150 | 高证据低频新候选 | Discovery Precision | Fold enrichment |
+|---|---:|---:|---:|---:|---:|
+| static mutation | 0.2826 | 0.5200 | 0 | 0.00% | 0.00 |
+| static degree | 0.0530 | 0.0400 | 10 | 23.81% | 2.57 |
+| static evidenceV2 | 0.0000 | 0.0000 | 0 | 0.00% | 0.00 |
+
+纯 discovery 的 rollout 配置 `(0,1)` 已把 Discovery precision 提升到 19.44%、fold enrichment 2.10，
+但仍低于 static degree 的 23.81% / 2.57；同时 Recovery 明显损失。该基线差距必须在后续 MORL 设计和
+报告中保留，不能只报告 RL 的相对改善。
+
+### 四、产物与标签隔离
+
+- 新重评目录：`outputs/rdprobe_rollout_primary_eval/`；
+  `summary_metrics.csv` 为逐 run 指标，`rd_probe_group_summary.csv` 为组汇总，
+  `rd_probe_direction.csv` 为方向性检验，`rd_probe_static_baselines.csv` 为静态基线；
+- 评价脚本中的 Discovery 已知集合只使用 Train∪Validation；Recovery 只读取 Validation 标签；
+  **Test 标签未读取、未参与 checkpoint 选择、权重选择或任何本轮结论。**
+
+---
+
+## Preference-conditioned MORL 实现与公平验证（2026-09-03）
+
+在 rollout 权重探针通过方向性门槛后，项目进入共享 MORL 实现阶段。实现严格保持既有
+`rd_scan` Recovery / Discovery reward 定义和参数不变；改变的仅是 Q 网络额外接收
+`w=(w_recovery,w_discovery)`，并让同一模型学习多个 preference。
+
+- 训练 preference（已见）：`(1,0)/(0.8,0.2)/(0.5,0.5)/(0.2,0.8)/(0,1)`；每轮从这些
+  preference 平衡采样，replay transition 同时存储对应 preference；
+- 评估 preference（未见插值诊断）：`(0.9,0.1)/(0.65,0.35)/(0.35,0.65)/(0.1,0.9)`；
+  未见 preference 不参与训练或 Pareto checkpoint 选择；它只检验连续 preference 输入的插值，
+  **不构成生物学或最终泛化证据**；
+- 每轮主评价均为 greedy rollout，记录 Recovery NDCG@150 / Recall@150 与 Discovery
+  Precision / Fold Enrichment；one-pass 不参与模型选择；
+- checkpoint 以每个已见 preference 的 rollout 三维向量
+  `(NDCG@150, Recall@150, DiscoveryPrecision@150)` 求 Pareto non-dominated 前沿，保留所有
+  任一已见 preference 前沿上的 checkpoint；Fold Enrichment 与 Precision 在固定候选池中完全共线，
+  因此记录但不重复放入支配判定；
+- 每个 MORL run 的 retained Pareto 点会与相同 seed / preference 的 15 个 scalarized RL run 直接比较，
+  报告共享模型是否覆盖或接近已有 frontier；
+- 2026-09-03 的首次 3-seed × 10 episode 运行只为实现冒烟：共享模型对每个 preference
+  平均只收集 2 个 episode，但每个 scalarized 对照各有 10 个 episode。因此它不能用于否定
+  MORL，也不作为是否扩至 5 seed 的决策依据；其历史比较结果保留在
+  `outputs/morl_shared_10ep_comparison/morl_vs_scalar_frontier_coverage.csv`；
+- 正式公平验证固定为 3 seed × 50 episode。五个已见 preference 使用同一随机五项循环，
+  各**恰好**训练 10 个 episode；训练摘要保存 `trained_preference_counts`，启动脚本会验证
+  每项均为 10 后才进入比较；
+- 正式验证顺序：只有 50-episode 结果中的 trade-off、未见 preference 插值和 scalar frontier
+  对比在 3 seed 稳定，才扩至不少于 5 seed；**Test 始终不参与训练、checkpoint、preference
+  或模型选择。**
+
+实现文件：
+
+- `scripts/train_preference_morl.py`：共享 preference Q、条件 replay、rollout Pareto checkpoint；
+- `scripts/analyze_preference_morl.py`：对 scalarized frontier 的逐 seed 覆盖比较；
+- `scripts/audit_preference_conditioning.py`：审计 `w` 的 Q→PER→sample→online/target TD 链，
+  并可对已训练 checkpoint 做固定 state 条件响应测试；
+- `scripts/run_preference_morl_validation.sh`：双头 vector-Q MORL 的 50-episode 公平 3-seed 启动脚本；为每次运行创建
+  唯一 output group，并在比较 CSV 未成功写入时失败退出。
+
+### 当前双头 vector-Q MORL 修复（尚未产生新的正式结果）
+
+针对 scalarized MORL 的 scale dominance 与 shared-trunk gradient conflict，当前实现改为：
+
+- Q 网络输出固定的两个头 `[Q_recovery, Q_discovery]`；两个头**不再接收** preference，避免
+  head 本身随 `w` 改变而失去可分解含义；
+- replay 保存 reward 向量，两个目标独立建立 Double-DQN TD target 和 Huber loss；Recovery 与
+  Discovery reward 分别是既有 `rd_scan` 在 `(1,0)`、`(0,1)` 的未加权端点值，仍按原来的 `[0,5]`
+  边界裁剪，不修改 reward 配方；
+- 仅在动作选择时，以每头 TD-target 绝对值 EMA 作尺度归一化后合成
+  `w_recovery * Q_recovery + w_discovery * Q_discovery`。该 EMA 同时用于每头 loss 和 PER priority，
+  防止绝对数值更大的头支配学习；
+- checkpoint 保存该尺度，保证 greedy rollout 与后验诊断使用训练时相同的合成口径；Test 仍完全冻结。
+
+2026-09-04 的 target/bootstrap 审计确认 terminal mask 正确，但发现非终止 TD bootstrap 可比即时
+reward 大数十至数千倍，且 seed45 的 target 明显大于已记录轨迹的折扣 return。因而新的 vector-Q
+训练默认使用 **PopArt**：每头网络预测标准化 return；EMA mean/std 更新时同步重标定 online 与 target
+的输出层，保持原始 Q 不突变。它取代旧版“只在 loss 上除以 scale”的做法，不改 reward、gamma、
+replay、greedy rollout 或 Test 隔离。旧 vector-Q checkpoint 明确标为 `legacy_loss_scale`，防止混用。
+
+`scripts/run_preference_morl_validation.sh` 现启动 seed 42/45/46 的 50-episode PopArt vector-Q 验证，
+每个已见 preference 恰好收集 10 个 episode；完成后自动进行同 seed scalar 对照、policy interpolation、
+head-scale 与 Recovery/Discovery objective-gradient cosine 的只读诊断。新诊断由
+`scripts/diagnose_vector_morl.py` 产生；它明确不把未序列化的历史 PER 采样/priority 伪装为可观测值。
+每个 episode 的两头尺度及优化摘要另写入该 run 的 `morl_training_metrics.csv`，便于检查尺度主导是否
+在训练中形成。
+
+该诊断还审计终止 transition：每个被抽样的终止项必须满足 `TD target == immediate reward`；非终止项
+单独记录 bootstrap 项相对即时 reward 的量级。它用于区分 terminal mask 错误与非终止 Q 自举增长，
+不参与训练或 checkpoint 选择。
+
+自动条件审计已通过：同一批 preference 完整进入两次 online-Q 与一次 target-Q，且
+preference encoder 梯度非零；对已训练的 10-episode checkpoint，固定 state 下不同 preference
+产生不同 Q 值与部分 Top-150 排序差异。这证明条件链未断，但不证明其偏好 trade-off 已学习成功。
+
+---
+
+## 主线切换：preference-conditioned contextual bandit（2026-09-08，代码与冒烟完成，正式训练待运行）
+
+基于 RL 必要性验证与 DDQN 历史状态消融，当前主线暂时从序列 DDQN / MORL 切换为共享的
+**preference-conditioned contextual bandit**。本轮的目的仅是检验：在不使用
+`gamma * Q_next` bootstrap 的情况下，一个共享模型能否根据 preference 学到稳定的
+Recovery–Discovery 排序取舍。
+
+- 保持 `hybrid6_raw` 特征（Degree、WeightValue、PatientCoverageCount、Mutation、Expression、
+  Methylation）和 PPI 图不变；当前正式链路**没有启用 GRN**，因此本轮不会重新加入 GRN；
+- 保持冻结的 `rd_scan` Recovery / Discovery 定义、evidenceV2 表、Train/Validation 划分不变；
+- Q 网络、PER transition、PER sample、online Q 和即时 TD loss 均接收同一个
+  `w=(w_recovery,w_discovery)`；bandit 的目标严格为 `Q(s,a,w) = r(s,a,w)`，不读取或使用
+  `Q_target(s',a')` 建立 TD target；
+- 每个 seed 用一个共享模型训练 50 episode，五个已见 preference
+  `(1,0)/(0.8,0.2)/(0.5,0.5)/(0.2,0.8)/(0,1)` 各恰好 10 episode；最终仅评估唯一的
+  final checkpoint 的 greedy rollout，不以 Validation 指标挑选 checkpoint；
+- 正式比较固定为 seed 42/45/46，输出 NDCG@150、Recall@150、Discovery Precision、
+  Fold Enrichment 与跨 seed Top-150 Jaccard，并和既有 scalar DDQN、scalar bandit、
+  static mutation、MLP、GCN 同表报告；Test 标签不读取、不参与任何训练或决定。
+
+实现文件：
+
+- `scripts/train_preference_bandit.py`：共享条件 bandit 训练与 final greedy rollout；
+- `scripts/run_preference_contextual_bandit.sh`：3 seed 正式启动与汇总；
+- `scripts/analyze_preference_bandit.py`：统一输出逐 seed、mean±SD、Jaccard、paired difference
+  和每 seed 的 preference 方向性结果。
+
+**公平性边界**：与每个 scalar 对照相比，每个 preference 都有相同的 10-episode 直接经验；但共享模型
+还会从另外四个 preference 的 40 episode 获得共享表示更新。因此该比较适合回答“共享条件模型是否能以
+每个条件 10 episode 覆盖多个偏好”，**不**能表述为总优化计算量完全相同的因果比较。报告中必须同时保留
+这一限制以及 3 seed 仅能支持描述性方向检验、不能声称统计显著性的限制。
+
+### 首次 3-seed 运行审查（2026-09-08）：不进入 5-seed 扩展
+
+首次输出 `outputs/preference_bandit_20260908_152823_comparison/` 的三个 run 均完整（50 episode，
+每个 preference 10 次），模型也确实是即时 reward bandit，Test 未读取。聚合均值表面上呈现
+Recovery 从 NDCG `0.1657` 降至 `0.1189`、Discovery Precision 从 `14.54%` 升至 `18.85%` 的端点
+变化，且 Top-150 Jaccard 在各 preference 为 `0.51–0.55`，高于对应 DDQN 的 `0.08–0.19`。
+
+但该结果**不能**据此扩到 5 seed：seed42、46 的方向正确，seed45 却反转
+（Recovery NDCG vs `w_discovery` Spearman `+0.40`，Discovery Precision `-0.95`）。更关键的是，
+首次实现把每 seed 的一个随机五项排列重复十次，使每个 preference 永远处于相同的 block 位置；
+preference 因而与 epsilon、replay 年龄和参数训练时间混杂。固定-state 审计显示三个模型都对
+preference 有 Q 值和排序响应，所以它不是条件输入断开的证据，而是**调度混杂下无法判定的
+训练稳定性结果**。
+
+正式重跑改用 `balanced_latin_blocks_v1`：每 5 个 block 构成 Latin square，每个 preference 在五个
+block 内的每个位置各一次；50 episode 下每项在每个位置各出现两次，仍保持总 exposure=10。只重跑
+seed42/45/46；不改变 reward、特征、网络、PER、评价、基线或 Test 隔离。旧结果保留为诊断记录，
+详见 `outputs/preference_bandit_20260908_152823_comparison/REVIEW.md`。
+
+### Phase-balanced 3-seed 验证（2026-09-08）：通过扩展门槛
+
+修正调度后的 `outputs/preference_bandit_20260908_171404_comparison/` 已完成。三个 seed 均满足
+每个 preference 10 次、每个 block 位置各 2 次；即时 bandit target、greedy final rollout 与 Test 冻结
+也均经配置审计确认。
+
+| 指标 | `(1,0)` | `(0,1)` | 3-seed 方向性 |
+|---|---:|---:|---|
+| NDCG@150 | 0.1479±0.0599 | 0.0885±0.0713 | seed42/45/46: `−1.00/−0.70/−0.70` |
+| Recall@150 | 0.2667±0.1222 | 0.1733±0.1405 | `−0.95/−0.87/−0.82` |
+| Discovery Precision | 21.39%±8.47% | 24.43%±8.86% | `+0.90/+0.89/+0.97` |
+| Fold Enrichment | 2.31±0.91 | 2.64±0.96 | `+0.90/+0.89/+0.97` |
+
+**判定**：Recovery↓ / Discovery↑ 在 3 seed 均同向，且 shared bandit 的 Top-150 Jaccard 为
+`0.26–0.36`，逐 preference 高于 scalar DDQN 的 `0.08–0.19`，因此满足预定的“扩至 5 seed”条件。
+
+边界同样保留：它在 Recovery 端低于 scalar contextual bandit（NDCG 0.2224）和 static mutation
+（0.2826），并且其 Jaccard 也低于 scalar contextual bandit；当前只能称为“相对 DDQN 更稳定地形成
+trade-off”，不能称为最优模型或全面胜出。
+
+下一步是 **5-seed shared-bandit 可重复性扩展**：保留已验证的 seed42/45/46，新增预先固定的
+seed47/48。为遵守“暂停 DDQN/MORL”的范围，不重训不匹配的 DDQN、MLP、GCN；因此 5-seed 阶段只检验
+shared bandit 本身的方向性与稳定性，跨方法的公平比较仍严格限于已有匹配的 3 seed。启动脚本为
+`scripts/run_preference_contextual_bandit_5seed_extension.sh`。
+
+### 冻结 checkpoint 的未见 preference 插值审计（2026-09-08）
+
+使用 `scripts/audit_preference_bandit_interpolation.py` 对 5 个 final checkpoint 做只读 greedy rollout，
+评估未见权重 `(0.9,0.1)/(0.65,0.35)/(0.35,0.65)/(0.1,0.9)`；没有继续训练、模型选择或 Test 读取。
+
+结论为**部分通过**：5 seed 在 seen+unseen 九个权重上的 Recovery NDCG 相关均为负，Discovery
+Precision 相关均为正，说明总体 trade-off 方向能够延伸到未见权重。但未见点只有 `11/20` 的 NDCG
+落入相邻 seen 指标区间（Recall `18/20`、Discovery `17/20`）；seed48 在中间权重出现 Top-150
+Jaccard `0.376/0.266` 的明显跳变。每 seed 的九个输入形成 5–9 个不同 Top-150 集合，故不是完整
+conditioning collapse，但也不能声称连续平滑的 preference 泛化已经成立。
+
+完整产物在 `outputs/preference_bandit_20260908_190650_interpolation/`。若必须支持任意连续权重，下一候选
+是双即时价值 head 的 contextual bandit（分别回归 Recovery/Discovery reward，选择动作时再按 `w`
+线性合成）；这仍不使用 bootstrap、不改变 reward，但属于新的结构验证，本轮尚未实施。
+
+---
+
+## 双即时价值 head contextual bandit（2026-09-08，代码与冒烟完成）
+
+当前只验证 dual-head bandit，不继续修改单-head bandit、DDQN/MORL、reward 或数据。严格实现为：
+
+- 共享原有 GCN/trunk，最后两个独立输出坐标分别预测
+  `Q_recovery(s,a)` 与 `Q_discovery(s,a)`；它们的 TD target 分别是已有 `rd_scan` 的两个未加权即时
+  reward，均不包含 `gamma * Q_next`；
+- preference 不进入两个 head；动作选择严格使用原始价值
+  `w_recovery * Q_recovery + w_discovery * Q_discovery`。每头 EMA scale 只平衡 Huber loss，不进入推理；
+- target 网络在 contextual-bandit 模式下不前向、也不更新；单元审计确认 target forward=0、参数变化=0；
+- 正式小规模验证固定 seed42/45/48、50 episode、phase-balanced 五个训练权重，并在 final checkpoint
+  上同时评价五个已见权重和四个未见权重；Test 完全冻结。
+
+实现与启动文件：
+
+- `scripts/train_dual_head_bandit.py`：双 head 即时 reward 训练与 seen/unseen final rollout；
+- `scripts/analyze_dual_head_bandit.py`：插值、Top-150 Jaccard、与 single-head shared/scalar bandit 的差值；
+- `scripts/run_dual_head_bandit_validation.sh`：seed42/45/48 正式验证入口。
+
+比较边界：single-head shared bandit 在 42/45/48 三个 seed 均有匹配结果；已有独立 scalar contextual
+bandit 只有 seed42/45/46，因此双 head 对 scalar bandit 只能公平配对 seed42/45（n=2）。受“只验证双
+head”约束，本轮不补训 seed48 scalar baseline，也不能把该差距表述为 3-seed 结论。
+
+### 双 head 正式结果与 Discovery 有效性审计（2026-09-09）
+
+seed42/45/48 的双即时价值 head 验证已完成。三个 seed 的总体 Recovery↓ / Discovery↑ 方向存在，
+但连续插值没有优于 single-head：相邻权重 Top-150 Jaccard 从 single-head 的 `0.887` 降至 `0.736`，
+且 seed48 在高 Discovery 端出现局部反转。因此连续 preference 不作为当前成立能力；仅冻结
+`(0.8,0.2)/(0.5,0.5)/(0.2,0.8)` 三档用于后续审计。
+
+随后执行了 reward 独立的 Discovery 有效性审计。三档候选在读取外部证据前冻结并记录 ranking、
+config、checkpoint 与候选文件哈希；审计没有训练、调 reward、增加 seed、重选 checkpoint 或读取
+Test 标签。独立证据包括预先冻结的 RCC 文献盲评集、CPTAC ccRCC 独立突变/蛋白组和 DepMap 24Q4
+ccRCC CRISPR 依赖。内部 `LowFrequencyEvidenceScoreV2` 只作为直接排序基线和相关性诊断，不作为外部终点。
+
+在共同的 2,419 个低频新候选池内，Top-150 的独立证据命中率 / fold enrichment 为：
+
+| 方法 | 命中率 | Fold | 跨 seed Top-150 Jaccard |
+|---|---:|---:|---:|
+| mutation | 0.420 | 2.39 | 静态 |
+| GCN | 0.389±0.017 | 2.21±0.10 | 0.822 |
+| dual-head bandit Recovery-heavy | 0.360±0.013 | 2.05±0.08 | 0.614 |
+| MLP | 0.324±0.079 | 1.85±0.45 | 0.604 |
+| dual-head bandit Balanced | 0.313±0.035 | 1.78±0.20 | 0.545 |
+| GRN degree | 0.287 | 1.63 | 静态 |
+| dual-head bandit Discovery-heavy | 0.251±0.089 | 1.43±0.50 | 0.379 |
+| PPI degree | 0.187 | 1.06 | 静态 |
+| EvidenceScore | 0.133 | 0.76 | 静态 |
+
+三个 Bandit 档位均未在全部 seed 上超过最强简单基线；严格配对 seed42/45 时，GCN 对三个档位均为
+2 胜 0 负。剔除 CPTAC 突变复现的事后敏感性分析中，最佳 Bandit 命中率为 `0.080`，仍低于
+PPI degree `0.093`、MLP `0.091` 和 GCN `0.089`。Bandit 不是 EvidenceScore 或 degree 的简单复制，
+但其低频池排名仍与 mutation 和 PPI degree 中度相关，且 Discovery-heavy 的独立命中与稳定性最弱。
+
+**当前路线判定**：按照预先约定的停止规则，Bandit 不再作为项目主线，仅保留为对照；下一阶段转向
+静态融合 / 监督排序。由于本轮 CPTAC、DepMap 和盲评结果已经用于路线判断，它们不得再用于新模型权重、
+checkpoint 或候选选择；新路线完成后需要新的未查看外部证据作最终评价。完整冻结协议、逻辑勘误、
+逐方法结果和图表位于 `outputs/discovery_validity_audit_20260909/`。

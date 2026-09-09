@@ -52,6 +52,12 @@ class DeepQNetwork:
             reward_weights=None,
             reward_feature_columns=None,
             lowfreq_evidence_by_gene=None,
+            preference_dim=0,
+            q_preference_dim=None,
+            objective_dim=1,
+            vector_value_normalization="legacy_loss_scale",
+            vector_action_scalarization="normalized",
+            learning_mode="ddqn",
     ):
         self.fea_ori = copy.deepcopy(fea_ori)
         self.train_patient_data = train_patient_data
@@ -64,6 +70,36 @@ class DeepQNetwork:
         self.actions_index = np.ones(n_actions)
         self.n_actions = n_actions
         self.feature_dim = self.fea_ori.shape[1] if len(self.fea_ori.shape) == 2 else 3
+        self.preference_dim = int(preference_dim)
+        if self.preference_dim < 0:
+            raise ValueError(f"preference_dim must be non-negative, got {preference_dim!r}")
+        self.q_preference_dim = self.preference_dim if q_preference_dim is None else int(q_preference_dim)
+        if self.q_preference_dim < 0:
+            raise ValueError(f"q_preference_dim must be non-negative, got {q_preference_dim!r}")
+        self.objective_dim = int(objective_dim)
+        if self.objective_dim not in {1, 2}:
+            raise ValueError(f"objective_dim must be 1 or 2, got {objective_dim!r}")
+        if self.objective_dim == 2 and self.q_preference_dim:
+            raise ValueError("Vector-Q must not condition its heads on preference; scalarize only at action selection.")
+        self.vector_value_normalization = str(vector_value_normalization)
+        if self.objective_dim == 2 and self.vector_value_normalization not in {
+                "legacy_loss_scale", "popart"
+        }:
+            raise ValueError(
+                "vector_value_normalization must be 'legacy_loss_scale' or 'popart'."
+            )
+        self.vector_action_scalarization = str(vector_action_scalarization)
+        if self.vector_action_scalarization not in {"normalized", "raw"}:
+            raise ValueError("vector_action_scalarization must be 'normalized' or 'raw'.")
+        self.learning_mode = str(learning_mode)
+        if self.learning_mode not in {"ddqn", "contextual_bandit"}:
+            raise ValueError("learning_mode must be 'ddqn' or 'contextual_bandit'.")
+        if self.learning_mode == "contextual_bandit" and self.objective_dim == 2:
+            if self.preference_dim != 2 or self.q_preference_dim != 0:
+                raise ValueError(
+                    "Dual-head contextual bandit requires preference_dim=2 and q_preference_dim=0; "
+                    "preferences are used only to combine the two action-value heads."
+                )
         self.embedding_size = embedding_size
         self.lr = learning_rate
         self.gamma = reward_decay
@@ -81,6 +117,9 @@ class DeepQNetwork:
         self.score_sta = 0
         self.score_pat = 0
         self.learn_step_counter = 0
+        self.objective_value_scale = np.ones(self.objective_dim, dtype=np.float32)
+        self.objective_value_mean = np.zeros(self.objective_dim, dtype=np.float32)
+        self.objective_scale_decay = 0.99
 
         self.memory_counter = 0
         self.tau = 0.001
@@ -121,8 +160,8 @@ class DeepQNetwork:
             )
         T = 3
         ALPHA = 0.0001
-        self.Q = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, net_ori)
-        self.Q_target = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, net_ori)
+        self.Q = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, net_ori, self.q_preference_dim, self.objective_dim)
+        self.Q_target = Q_Fun(self.feature_dim, self.embedding_size, T, ALPHA, net_ori, self.q_preference_dim, self.objective_dim)
         self.Q_target.load_state_dict(self.Q.state_dict())
         self.Q_target.eval()
         print(f"📌 Q network input feature dim: {self.feature_dim}")
@@ -150,6 +189,8 @@ class DeepQNetwork:
             beta_start=0.1,
             beta_frames=2000000,
             eps=1e-5,
+            preference_dim=self.preference_dim,
+            reward_dim=self.objective_dim,
         )
 
         self.score_alpha = score_alpha
@@ -223,6 +264,104 @@ class DeepQNetwork:
         weights = self.default_reward_weights()
         weights.update(self.reward_weights)
         return float(weights[name])
+
+    def set_preference(self, preference):
+        """Activate a Recovery–Discovery preference for the next collected episode.
+
+        The scalar reward definition remains exactly ``rd_scan``; this method only
+        supplies its two existing weights and keeps the same vector available to
+        the preference-conditioned Q network/replay transition.
+        """
+        if self.preference_dim != 2:
+            raise RuntimeError("set_preference requires preference_dim=2.")
+        value = np.asarray(preference, dtype=np.float32)
+        if value.shape != (2,) or not np.isfinite(value).all():
+            raise ValueError(f"preference must be a finite shape-(2,) vector, got {preference!r}")
+        if np.any(value < 0.0) or not np.isclose(float(value.sum()), 1.0, atol=1e-6):
+            raise ValueError("preference must be non-negative and sum to 1.")
+        if self.reward_mode != "rd_scan":
+            raise RuntimeError("Preference conditioning is only valid for reward_mode='rd_scan'.")
+        # Scalar rd_scan logging keeps its historical weighted reward.  Vector-Q
+        # learning reads the two raw components recorded by step() instead.
+        self.reward_weights["w_recovery"] = float(value[0])
+        self.reward_weights["w_discovery"] = float(value[1])
+        self.active_preference = value.copy()
+        return self.active_preference
+
+    def scalarize_q(self, q_values, preference):
+        """Combine vector action values under the configured preference."""
+        if self.objective_dim == 1:
+            return q_values
+        pref = torch.as_tensor(preference, dtype=q_values.dtype, device=q_values.device)
+        expected = (2,) if q_values.ndim == 2 else (q_values.shape[0], 2)
+        if tuple(pref.shape) != expected:
+            raise ValueError(f"preference shape must be {expected}, got {tuple(pref.shape)}")
+        if self.vector_action_scalarization == "raw":
+            values = self.denormalize_objective_q(q_values)
+        elif self.vector_value_normalization == "popart":
+            # PopArt heads already predict z=(Q_raw-mean)/scale.
+            values = q_values
+        else:
+            scale = torch.as_tensor(self.objective_value_scale, dtype=q_values.dtype, device=q_values.device)
+            values = q_values / scale
+        return torch.sum(values * (pref if q_values.ndim == 2 else pref.unsqueeze(1)), dim=-1)
+
+    def denormalize_objective_q(self, q_values):
+        """Map PopArt normalized head values back to raw discounted returns."""
+        if self.objective_dim != 2 or self.vector_value_normalization != "popart":
+            return q_values
+        mean = torch.as_tensor(self.objective_value_mean, dtype=q_values.dtype, device=q_values.device)
+        scale = torch.as_tensor(self.objective_value_scale, dtype=q_values.dtype, device=q_values.device)
+        return q_values * scale + mean
+
+    def normalize_objective_q(self, q_values):
+        if self.objective_dim != 2 or self.vector_value_normalization != "popart":
+            return q_values
+        mean = torch.as_tensor(self.objective_value_mean, dtype=q_values.dtype, device=q_values.device)
+        scale = torch.as_tensor(self.objective_value_scale, dtype=q_values.dtype, device=q_values.device)
+        return (q_values - mean) / scale
+
+    @staticmethod
+    def _rescale_popart_output_head(model, old_mean, old_scale, new_mean, new_scale):
+        """Change normalized output coordinates without changing raw Q values."""
+        layer = model.lin8
+        with torch.no_grad():
+            old_mean = torch.as_tensor(old_mean, dtype=layer.bias.dtype, device=layer.bias.device)
+            old_scale = torch.as_tensor(old_scale, dtype=layer.bias.dtype, device=layer.bias.device)
+            new_mean = torch.as_tensor(new_mean, dtype=layer.bias.dtype, device=layer.bias.device)
+            new_scale = torch.as_tensor(new_scale, dtype=layer.bias.dtype, device=layer.bias.device)
+            factor = old_scale / new_scale
+            layer.weight.mul_(factor.unsqueeze(1))
+            layer.bias.copy_((old_scale * layer.bias + old_mean - new_mean) / new_scale)
+
+    def _update_popart_statistics(self, raw_targets):
+        """EMA PopArt statistics and output-head rescaling for both Q networks."""
+        if self.objective_dim != 2 or self.vector_value_normalization != "popart":
+            return
+        values = raw_targets.detach().to(dtype=torch.float32)
+        batch_mean = values.mean(dim=0).cpu().numpy()
+        batch_second = values.square().mean(dim=0).cpu().numpy()
+        old_mean = self.objective_value_mean.copy()
+        old_scale = self.objective_value_scale.copy()
+        old_second = np.square(old_scale) + np.square(old_mean)
+        new_mean = self.objective_scale_decay * old_mean + (1.0 - self.objective_scale_decay) * batch_mean
+        new_second = self.objective_scale_decay * old_second + (1.0 - self.objective_scale_decay) * batch_second
+        new_scale = np.sqrt(np.maximum(new_second - np.square(new_mean), 1e-6)).astype(np.float32)
+        self._rescale_popart_output_head(self.Q, old_mean, old_scale, new_mean, new_scale)
+        self._rescale_popart_output_head(self.Q_target, old_mean, old_scale, new_mean, new_scale)
+        self.objective_value_mean = new_mean.astype(np.float32)
+        self.objective_value_scale = new_scale
+
+    def vector_reward(self):
+        if self.objective_dim != 2:
+            raise RuntimeError("vector_reward is only valid for objective_dim=2.")
+        value = np.asarray([
+            self.last_reward_components.get("reward_recovery_raw"),
+            self.last_reward_components.get("reward_discovery_raw"),
+        ], dtype=np.float32)
+        if value.shape != (2,) or not np.isfinite(value).all():
+            raise RuntimeError("rd_scan did not produce finite raw Recovery/Discovery rewards.")
+        return value
 
     def _feature_percentile(self, column, action):
         values = self.reward_feature_percentiles.get(column)
@@ -353,10 +492,20 @@ class DeepQNetwork:
             components["reward_legacy"] = float(w_rec * legacy_base)
             components["reward_train_label"] = float(w_rec * train_label_bonus)
             components["reward_evidence_bonus"] = float(w_disc * discovery_raw)
+            # These are the *unweighted endpoint rewards* used by vector-Q.
+            # Keeping the historical [0, 5] clip here makes vector head 0/1
+            # exactly agree with the old scalar rd_scan reward at w=(1,0) and
+            # w=(0,1), respectively.  The weighted scalar components above are
+            # retained unchanged for legacy logging only.
+            components["_recovery_raw"] = float(np.clip(legacy_base + train_label_bonus, 0.0, 5.0))
+            components["_discovery_raw"] = float(np.clip(discovery_raw, 0.0, 5.0))
         else:
             raise ValueError(f"Unsupported reward_mode: {mode!r}")
 
-        raw_total = sum(value for key, value in components.items() if key != "reward_total")
+        raw_total = sum(
+            value for key, value in components.items()
+            if key != "reward_total" and not key.startswith("_")
+        )
         total = float(np.clip(raw_total, 0.0, 5.0))
         components["reward_penalty"] += total - raw_total
         components["reward_total"] = total
@@ -492,6 +641,8 @@ class DeepQNetwork:
             "selected_gene": selected_gene,
             "is_train_driver": bool(is_train_driver),
             **components,
+            "reward_recovery_raw": float(components.get("_recovery_raw", base_reward)),
+            "reward_discovery_raw": float(components.get("_discovery_raw", 0.0)),
             "base_reward": base_reward,
             "evidence_bonus": float(components.get("reward_evidence_bonus", 0.0)),
             "final_reward": float(reward),
@@ -553,8 +704,13 @@ class DeepQNetwork:
 
         return reward, done, actions
 
-    def remember(self, *args):
-        self.memory.store_transition(*args)
+    def remember(self, *args, preference=None, history_mask=None, next_history_mask=None):
+        self.memory.store_transition(
+            *args,
+            preference=preference,
+            history_mask=history_mask,
+            next_history_mask=next_history_mask,
+        )
         self.memory_counter += 1
 
     def clear_mem(self):
@@ -569,7 +725,7 @@ class DeepQNetwork:
         self.Q_target.eval()
         # ========== 从经验回放池采样一批经验 ==========
         # 对应：(S, A, R, S', 动作掩码)
-        state, action, reward_sum, action_index, next_action_index, done, sample_indices, is_weights = \
+        state, action, reward_sum, action_index, next_action_index, history_index, next_history_index, done, sample_indices, is_weights, preference = \
             self.memory.sample_buffer(self.batch_size)
         # 清空 Q 网络的梯度（上一步的梯度残留要清掉）
         self.Q.optimizer.zero_grad()
@@ -577,7 +733,7 @@ class DeepQNetwork:
 
         state = torch.tensor(state, dtype=torch.float32).to(self.Q.device)
         action = torch.LongTensor(action).view(-1, 1).to(self.Q.device)
-        reward_sum = torch.tensor(reward_sum, dtype=torch.float32).view(-1, 1).to(self.Q.device)
+        reward_sum = torch.tensor(reward_sum, dtype=torch.float32).view(-1, self.objective_dim).to(self.Q.device)
         # 修复(2026-09-01):不再除以 10.0。此前 reward/10 使 TD target 中 reward 占比极低
         # (legacy 每步均值 0.012 → /10 后 0.0012,而 Q_next 约 1~5,reward 贡献 <1%),
         # 目标几乎退化为 gamma*Q_next 的价值自洽,奖励信号被完全淹没。
@@ -585,50 +741,95 @@ class DeepQNetwork:
 
         action_index = torch.LongTensor(action_index).to(self.Q.device)
         next_action_index = torch.LongTensor(next_action_index).to(self.Q.device)
+        history_index = torch.LongTensor(history_index).to(self.Q.device)
+        next_history_index = torch.LongTensor(next_history_index).to(self.Q.device)
         done = torch.tensor(done, dtype=torch.float32).view(-1, 1).to(self.Q.device)
         is_weights = torch.tensor(is_weights, dtype=torch.float32).to(self.Q.device)
+        preference_tensor = (
+            torch.tensor(preference, dtype=torch.float32).to(self.Q.device)
+            if self.q_preference_dim else None
+        )
 
                 # ========== 计算目标 Q 值 y_t ==========
-        # ========== 计算目标 Q 值 y_t (Double DQN 升级版) ==========
-        with torch.no_grad():  # 眺望未来不需要计算梯度，省显存+加速
-            # Online Network 负责动作选择：
-            # a* = argmax Q_online(s'_i, a')
-            next_q_values_online, _ = self.Q(mu, new_state, next_action_index, batch_flag=True)
-            # ⚠️ 极其关键的“掩码(Masking)”操作：
-            # next_action_index 中为 0 代表该基因已经入选，不能再挑了。
-            # 我们把这些不可选基因的 Q 值强行变成 -1e9（极小值），防止 argmax 选错。
-            mask = next_action_index == 0
-            next_q_values_online = next_q_values_online.masked_fill(mask, -1e9)
+        # DDQN bootstraps from Q(s',a*).  The contextual-bandit control keeps
+        # the identical state/action encoder, replay schedule and reward, but
+        # learns only the immediate action reward Q(s,a)≈r(s,a).
+        if self.learning_mode == "contextual_bandit":
+            y_target = reward_sum
+        else:
+            # ========== 计算目标 Q 值 y_t (Double DQN 升级版) ==========
+            with torch.no_grad():  # 眺望未来不需要计算梯度，省显存+加速
+                # Online Network 负责动作选择：a* = argmax Q_online(s'_i, a')
+                next_q_values_online, _ = self.Q(
+                    mu, new_state, next_history_index, batch_flag=True, preference=preference_tensor
+                )
+                mask = next_action_index == 0
+                action_scores = (
+                    next_q_values_online if self.objective_dim == 1 else self.scalarize_q(
+                        next_q_values_online,
+                        torch.tensor(preference, dtype=torch.float32, device=self.Q.device),
+                    )
+                )
+                best_next_actions = action_scores.masked_fill(mask, -1e9).argmax(dim=1, keepdim=True)
 
-            # 找出最高分的动作索引，对应公式里的 argmax a'
-            best_next_actions = next_q_values_online.argmax(dim=1, keepdim=True)
+                # 第二步：目标网络 (self.Q_target) 当“裁判”，对 S' 进行独立打分
+                next_q_values_target, _ = self.Q_target(
+                    mu, new_state, next_history_index, batch_flag=True, preference=preference_tensor
+                )
+                next_q_target = (
+                    next_q_values_target.gather(1, best_next_actions)
+                    if self.objective_dim == 1 else next_q_values_target.gather(
+                        1, best_next_actions.unsqueeze(-1).expand(-1, 1, self.objective_dim)
+                    ).squeeze(1)
+                )
+                next_q_target = self.denormalize_objective_q(next_q_target)
+                y_target = reward_sum + self.gamma * (1.0 - done) * next_q_target
 
-            # 第二步：目标网络 (self.Q_target) 当“裁判”，对 S' 进行独立打分
-            next_q_values_target, _ = self.Q_target(mu, new_state, next_action_index, batch_flag=True)
-            next_q_target = next_q_values_target.gather(1, best_next_actions)
-
-            y_target = reward_sum + self.gamma * (1.0 - done) * next_q_target
-
+        # PopArt updates the coordinate system before the gradient forward pass.
+        # Both online and target lin8 heads are rescaled so their *raw* Q values
+        # remain continuous while the network learns standardized TD targets.
+        if self.objective_dim == 2 and self.vector_value_normalization == "popart":
+            self._update_popart_statistics(y_target)
 
         # ========== 计算当前 Q 值 Q(s,a;θ) ==========
         y_pred_all, _ = self.Q(
             mu,
             state,
-            action_index,
-            batch_flag=True
+            history_index,
+            batch_flag=True,
+            preference=preference_tensor,
         )# 用 Q 网络计算当前状态 S 的所有 Q 值
-        y_pred = y_pred_all.gather(1, action)# 只取「实际执行的动作 A」对应的 Q 值
+        y_pred = (
+            y_pred_all.gather(1, action)
+            if self.objective_dim == 1 else y_pred_all.gather(
+                1, action.unsqueeze(-1).expand(-1, 1, self.objective_dim)
+            ).squeeze(1)
+        )
         # ========== 计算损失函数 Loss  ==========
         # 对应论文公式：L = (y_t - Q(s,a;θ))²
-        td_errors = y_target - y_pred
+        y_pred_raw = self.denormalize_objective_q(y_pred)
+        td_errors = y_target - y_pred_raw
 
-        elementwise_loss = torch.nn.functional.smooth_l1_loss(
-            y_pred,
-            y_target,
-            reduction="none"
-        )
-
-        loss = torch.mean(is_weights * elementwise_loss)
+        if self.objective_dim == 2:
+            if self.vector_value_normalization == "popart":
+                loss_prediction = y_pred
+                loss_target = self.normalize_objective_q(y_target)
+            else:
+                target_abs = y_target.detach().abs().mean(dim=0).cpu().numpy()
+                self.objective_value_scale = (
+                    self.objective_scale_decay * self.objective_value_scale
+                    + (1.0 - self.objective_scale_decay) * np.maximum(target_abs, 1e-3)
+                ).astype(np.float32)
+                scale = torch.as_tensor(self.objective_value_scale, dtype=torch.float32, device=self.Q.device)
+                loss_prediction = y_pred / scale
+                loss_target = y_target / scale
+            elementwise_loss = torch.nn.functional.smooth_l1_loss(
+                loss_prediction, loss_target, reduction="none"
+            )
+            loss = torch.mean(is_weights * elementwise_loss.mean(dim=1, keepdim=True))
+        else:
+            elementwise_loss = torch.nn.functional.smooth_l1_loss(y_pred, y_target, reduction="none")
+            loss = torch.mean(is_weights * elementwise_loss)
         # ==========  反向传播更新 Q 网络权重 ==========
         loss.backward()
         # 🛡️ 新增：梯度裁剪防弹衣！强行把超过 1.0 的极端梯度削平，防止网络崩溃
@@ -638,19 +839,28 @@ class DeepQNetwork:
         )
         self.Q.optimizer.step()
         td_errors_np = td_errors.detach().abs().cpu().numpy()
-        self.memory.update_priorities(sample_indices, td_errors_np)
+        priority_errors = (
+            td_errors_np.mean(axis=1, keepdims=True) / float(self.objective_value_scale.mean())
+            if self.objective_dim == 2 else td_errors_np
+        )
+        self.memory.update_priorities(sample_indices, priority_errors)
         self.last_learn_metrics = {
             "loss": float(loss.item()),
             "td_error_abs_mean": float(np.mean(td_errors_np)),
             "gradient_norm": float(gradient_norm.item() if hasattr(gradient_norm, "item") else gradient_norm),
+            "objective_value_mean": self.objective_value_mean.tolist(),
+            "objective_value_scale": self.objective_value_scale.tolist(),
+            "objective_td_error_abs_mean": td_errors_np.mean(axis=0).tolist(),
         }
         self.learn_step_counter += 1
-        # ========== 软更新目标 Q 网络 θ⁻ ==========
-        # 每次 learn() 都让目标网络向当前 Q 网络平滑逼近一点点
-        tau = self.tau # 平滑系数 (通常取 0.001 到 0.005 之间，你也可以把它写进 __init__ 中作为 self.tau)
-        for target_param, local_param in zip(self.Q_target.parameters(), self.Q.parameters()):
-            target_param.data.copy_(
-                self.tau * local_param.data + (1.0 - self.tau) * target_param.data
-            )
+        # The target network has no role in a contextual bandit. Keeping it
+        # frozen makes the no-bootstrap contract explicit. DDQN retains its
+        # original soft target update.
+        if self.learning_mode == "ddqn":
+            tau = self.tau
+            for target_param, local_param in zip(self.Q_target.parameters(), self.Q.parameters()):
+                target_param.data.copy_(
+                    tau * local_param.data + (1.0 - tau) * target_param.data
+                )
 
 

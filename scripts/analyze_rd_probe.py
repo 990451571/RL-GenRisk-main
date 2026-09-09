@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Recovery–Discovery 权重探针分析：mean±SD + 方向性判定（2026-09-02）。
+"""Recovery–Discovery 权重探针的 rollout 主口径分析。
 
 输入：evaluate_greedy_rollout.py 的 summary_metrics.csv（含两条 Discovery 指标列）。
 输出（控制台 + CSV）：
-  A. 每组权重(w_rec,w_disc)×3 seed 的四指标 mean±SD；
+  A. 每组权重(w_rec,w_disc)×3 seed 的 rollout 主指标 mean±SD；
   B. 方向性：w_disc 从 0→1，Recovery(NDCG@150/Recall@150) 是否一致下降、
-     Discovery(LowFreqNovel@150/EvidenceSupportedLowFreqNovel@150) 是否一致上升。
-     逐 seed 看 Spearman 符号一致率，避免只靠 15 个点整体相关。
+     DiscoveryPrecision / DiscoveryFoldEnrichment 是否一致上升；
+     逐 seed 看 Spearman 符号一致率，避免只靠 15 个点整体相关；
+  C. mutation、degree、evidenceV2 静态基线的相同 Discovery 指标。
 
 判读（用户裁定）：
-  - 若权重升高能稳定、同向改变这些指标 → 进 preference-conditioned MORL；
+  - 若 3 个 seed 下权重升高能稳定、同向改变这些主指标 → 进 preference-conditioned MORL；
   - 否则暂停 MORL，重新定义 Recovery/Discovery 目标。
 """
 from __future__ import annotations
@@ -23,9 +24,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-RECOVERY_METRICS = ["NDCG@150", "Recall@150", "HitCount@150"]
-DISCOVERY_METRICS = ["LowFreqNovel@150", "EvidenceSupportedLowFreqNovel@150"]
-ALL_METRICS = RECOVERY_METRICS + DISCOVERY_METRICS
+RECOVERY_METRICS = ["NDCG@150", "Recall@150"]
+DISCOVERY_METRICS = [
+    "HighEvidenceLowFreqNovel@150",
+    "DiscoveryPrecision@150",
+    "DiscoveryFoldEnrichment@150",
+]
+CONTEXT_METRICS = ["HitCount@150", "LowFreqNovel@150"]
+ALL_METRICS = RECOVERY_METRICS + CONTEXT_METRICS + DISCOVERY_METRICS
+STATIC_BASELINES = ["static_mutation", "static_degree", "static_evidenceV2"]
 
 RUN_RE = re.compile(r".*_r(?P<rec>\d+(?:\.\d+)?)_d(?P<disc>\d+(?:\.\d+)?)_seed(?P<seed>\d+)$")
 
@@ -45,8 +52,7 @@ def main():
     ap.add_argument("--eval-dir", required=True, help="summary_metrics.csv 所在目录")
     ap.add_argument("--output-dir", default=None, help="输出目录（默认同 eval-dir）")
     ap.add_argument("--methods", nargs="+",
-                    default=["pretrain_Q_onepass", "best_Q_onepass", "best_Q_rollout",
-                             "last_Q_onepass"],
+                    default=["rollout_primary_available"],
                     help="要汇总的 Method 子集（须是 summary_metrics.csv 中出现的方法名）")
     args = ap.parse_args()
 
@@ -137,7 +143,13 @@ def main():
                   f"  端点({min(groups):.1f}→{max(groups):.1f})均值 {m0:.3f}→{m1:.3f}"
                   f"  符号一致 {n_agree}/{len(seed_signs)}")
             dir_rows.append({
-                "Method": method, "metric": m, "kind": "recovery" if m in RECOVERY_METRICS else "discovery",
+                "Method": method,
+                "metric": m,
+                "kind": (
+                    "recovery" if m in RECOVERY_METRICS
+                    else "discovery" if m in DISCOVERY_METRICS
+                    else "context"
+                ),
                 "rho_all": rho_all, "seed_rhos": per_seed, "seeds_agree_sign": n_agree,
                 "n_seeds": len(seed_signs), "endpoint_min_wdisc": min(groups),
                 "endpoint_max_wdisc": max(groups),
@@ -150,26 +162,56 @@ def main():
     pd.DataFrame(dir_rows).to_csv(out_dir / "rd_probe_direction.csv",
                                   index=False, encoding="utf-8-sig")
 
+    # 静态基线不依赖 reward 权重；从 15 个重复评估中汇总同一套指标，方便公平对照。
+    baseline_rows = []
+    for method in STATIC_BASELINES:
+        sub = long[long["Method"] == method]
+        if sub.empty:
+            continue
+        for metric in ALL_METRICS:
+            vals = pd.to_numeric(sub[metric], errors="coerce").dropna().to_numpy(dtype=float)
+            unique_vals = np.unique(np.round(vals, decimals=12))
+            baseline_rows.append({
+                "Method": method,
+                "metric": metric,
+                "value": float(vals[0]) if len(vals) else np.nan,
+                "repeated_evaluations": int(len(vals)),
+                "unique_value_count": int(len(unique_vals)),
+            })
+    pd.DataFrame(baseline_rows).to_csv(
+        out_dir / "rd_probe_static_baselines.csv", index=False, encoding="utf-8-sig"
+    )
+
     # ================= 汇总判定 =================
     print("\n" + "=" * 78)
-    print("汇总判定（以 best_Q_onepass / best_Q_rollout 为准，用户裁定口径）")
-    for method in ["best_Q_onepass", "best_Q_rollout"]:
+    print("汇总判定（rollout 主口径；只在既有 best / last checkpoint 中选择）")
+    for method in ["rollout_primary_available"]:
         dr = pd.DataFrame([r for r in dir_rows if r["Method"] == method])
         if dr.empty:
             continue
         rec = dr[dr["kind"] == "recovery"]
         dis = dr[dr["kind"] == "discovery"]
-        rec_down = rec.apply(lambda r: r["rho_all"] < -0.3 and r["seeds_agree_sign"] >= max(1, r["n_seeds"] - 1), axis=1)
-        dis_up = dis.apply(lambda r: r["rho_all"] > 0.3 and r["seeds_agree_sign"] >= max(1, r["n_seeds"] - 1), axis=1)
+        dis_for_gate = dis[dis["metric"].isin([
+            "DiscoveryPrecision@150", "DiscoveryFoldEnrichment@150"
+        ])]
+        rec_down = rec.apply(
+            lambda r: r["rho_all"] < -0.3 and r["seeds_agree_sign"] == r["n_seeds"], axis=1
+        )
+        dis_up = dis_for_gate.apply(
+            lambda r: r["rho_all"] > 0.3 and r["seeds_agree_sign"] == r["n_seeds"], axis=1
+        )
         ok = bool(rec_down.all() if len(rec) else False) and bool(dis_up.all() if len(dis) else False)
         print(f"\n  {method}:")
-        print(f"    Recovery 指标随 w_disc 上升而一致下降：{'✓' if rec_down.all() else '✗'}")
-        print(f"    Discovery 指标随 w_disc 上升而一致上升：{'✓' if dis_up.all() else '✗'}")
+        print(f"    Recovery（NDCG / Recall）随 w_disc 上升而 3 seed 一致下降：{'✓' if rec_down.all() else '✗'}")
+        print(f"    Discovery Precision / Fold enrichment 随 w_disc 上升而 3 seed 一致上升：{'✓' if dis_up.all() else '✗'}")
         if ok:
             print("    ⇒ 权重变化稳定、同向改变指标 → 可进入 preference-conditioned MORL。")
         else:
             print("    ⇒ 权重变化不能稳定/同向改变指标 → 暂停 MORL，重新定义 Recovery/Discovery。")
-    print(f"\n详细表已写入 {out_dir}/rd_probe_group_summary.csv 与 {out_dir}/rd_probe_direction.csv")
+    print(
+        f"\n详细表已写入 {out_dir}/rd_probe_group_summary.csv、{out_dir}/rd_probe_direction.csv"
+        f" 与 {out_dir}/rd_probe_static_baselines.csv"
+    )
 
 
 if __name__ == "__main__":

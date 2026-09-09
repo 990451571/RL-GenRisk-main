@@ -1,0 +1,138 @@
+{
+  "freeze_version": "discovery_candidates_v1",
+  "frozen_at_utc": "2026-09-09T07:14:54.822528+00:00",
+  "model_scope": "latest dual-head contextual bandit",
+  "seeds": [
+    42,
+    45,
+    48
+  ],
+  "preferences": {
+    "recovery_heavy": "r0.80_d0.20",
+    "compromise": "r0.50_d0.50",
+    "discovery_heavy": "r0.20_d0.80"
+  },
+  "top_k": 150,
+  "candidate_selection_after_freeze_allowed": false,
+  "external_evidence_read_by_freeze": false,
+  "test_labels_read": false,
+  "files": [
+    {
+      "profile": "recovery_heavy",
+      "preference": "r0.80_d0.20",
+      "seed": 42,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/final_rollout_rankings/r0.80_d0.20.csv",
+      "source_ranking_sha256": "22e01e4d4fb3a0eeb8ad788ab412e80401d31152a0fd8a5c857b1f3423239091",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/recovery_heavy_r0.80_d0.20_seed42_top150.csv",
+      "frozen_top150_sha256": "62a6245c72952503e713631e85d32de9c748f34b202d78720cde6c17a7ef8761",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/dual_head_bandit_config.json",
+      "config_sha256": "a72e045fbfb944d3703a48816cf803e85db694c41679ab5a46ce388d3f9717d5",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/checkpoint_final.pt",
+      "checkpoint_sha256": "330703cde6540c269cd9c1e653370e7bf1eb18fccc3f28334161ff5ed413f446"
+    },
+    {
+      "profile": "compromise",
+      "preference": "r0.50_d0.50",
+      "seed": 42,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/final_rollout_rankings/r0.50_d0.50.csv",
+      "source_ranking_sha256": "63af5de2a1a43791fe83fe769e9fbdbdd6392a2830b2c6bc19f7ebbcbf237fb7",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/compromise_r0.50_d0.50_seed42_top150.csv",
+      "frozen_top150_sha256": "7fdfede5fb97fbd9cdf488f6a14931434e020180d6f5d1a9144957239ef18f7a",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/dual_head_bandit_config.json",
+      "config_sha256": "a72e045fbfb944d3703a48816cf803e85db694c41679ab5a46ce388d3f9717d5",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/checkpoint_final.pt",
+      "checkpoint_sha256": "330703cde6540c269cd9c1e653370e7bf1eb18fccc3f28334161ff5ed413f446"
+    },
+    {
+      "profile": "discovery_heavy",
+      "preference": "r0.20_d0.80",
+      "seed": 42,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/final_rollout_rankings/r0.20_d0.80.csv",
+      "source_ranking_sha256": "0f7f3a30b9eab9044897fadbfef7635f1501ed5a6a4f4b3f8c1e7d5e176b62f7",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/discovery_heavy_r0.20_d0.80_seed42_top150.csv",
+      "frozen_top150_sha256": "0704ea65e4bcf38b7312511dcebb4127a5219505f9cca7737f94ede86011cf05",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/dual_head_bandit_config.json",
+      "config_sha256": "a72e045fbfb944d3703a48816cf803e85db694c41679ab5a46ce388d3f9717d5",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed42/hybrid6_raw/seed_42_20260908_210041/checkpoint_final.pt",
+      "checkpoint_sha256": "330703cde6540c269cd9c1e653370e7bf1eb18fccc3f28334161ff5ed413f446"
+    },
+    {
+      "profile": "recovery_heavy",
+      "preference": "r0.80_d0.20",
+      "seed": 45,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/final_rollout_rankings/r0.80_d0.20.csv",
+      "source_ranking_sha256": "14f0c8f8bfcf09694f94083f605b74981ad9f1683cdb753a05ae7b157f09e1ae",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/recovery_heavy_r0.80_d0.20_seed45_top150.csv",
+      "frozen_top150_sha256": "e96d4016c21360425a17e64c732f2727af4dfc02ba8b473495899433427ef7ee",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/dual_head_bandit_config.json",
+      "config_sha256": "d45a9e95645df54ee0bde67aa4d0859fa5b218ccc70740f33e39cb2df980353c",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/checkpoint_final.pt",
+      "checkpoint_sha256": "552c27f1e56cc659cd3d30c1e4b3a28877704ebe0d6a40a34156200b1997ffcf"
+    },
+    {
+      "profile": "compromise",
+      "preference": "r0.50_d0.50",
+      "seed": 45,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/final_rollout_rankings/r0.50_d0.50.csv",
+      "source_ranking_sha256": "e090ae05314bc981595ee9afc214e171580de08969a23b06725e41d33f0c8738",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/compromise_r0.50_d0.50_seed45_top150.csv",
+      "frozen_top150_sha256": "73d5b9e40b0c61d778deb71077bd5d3c670428f28e20ba9f0e5c4ce8effa20a3",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/dual_head_bandit_config.json",
+      "config_sha256": "d45a9e95645df54ee0bde67aa4d0859fa5b218ccc70740f33e39cb2df980353c",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/checkpoint_final.pt",
+      "checkpoint_sha256": "552c27f1e56cc659cd3d30c1e4b3a28877704ebe0d6a40a34156200b1997ffcf"
+    },
+    {
+      "profile": "discovery_heavy",
+      "preference": "r0.20_d0.80",
+      "seed": 45,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/final_rollout_rankings/r0.20_d0.80.csv",
+      "source_ranking_sha256": "3fb25e775e5cc171b198257da9fb1a71f2a1ffabdb4406a66d397e3074685151",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/discovery_heavy_r0.20_d0.80_seed45_top150.csv",
+      "frozen_top150_sha256": "41a2c30b3e0e851c11a85cd573a3d728d0e383612a606462efc80560769fc437",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/dual_head_bandit_config.json",
+      "config_sha256": "d45a9e95645df54ee0bde67aa4d0859fa5b218ccc70740f33e39cb2df980353c",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed45/hybrid6_raw/seed_45_20260908_212658/checkpoint_final.pt",
+      "checkpoint_sha256": "552c27f1e56cc659cd3d30c1e4b3a28877704ebe0d6a40a34156200b1997ffcf"
+    },
+    {
+      "profile": "recovery_heavy",
+      "preference": "r0.80_d0.20",
+      "seed": 48,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/final_rollout_rankings/r0.80_d0.20.csv",
+      "source_ranking_sha256": "794aa2fa0bc52ad36ca33e24cd50d1159402a171648306d340e13fbc27a1a0aa",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/recovery_heavy_r0.80_d0.20_seed48_top150.csv",
+      "frozen_top150_sha256": "c215de52489098e2e8140b0546dc5cc4b2b8f948c7c03286fb2ae1c35f8dc815",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/dual_head_bandit_config.json",
+      "config_sha256": "5e4e9fec3107d3234ed16daa148d64d75dca00549adc7c02030600705f18368f",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/checkpoint_final.pt",
+      "checkpoint_sha256": "74a086fcad2f2134d24321df4132a2c3d1f2dc4694c867562e88fd5ad34b4944"
+    },
+    {
+      "profile": "compromise",
+      "preference": "r0.50_d0.50",
+      "seed": 48,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/final_rollout_rankings/r0.50_d0.50.csv",
+      "source_ranking_sha256": "e7298ec0931051ffee9dddabc2ecf9dc460ce94d57c63e77612c8d6b3a54c059",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/compromise_r0.50_d0.50_seed48_top150.csv",
+      "frozen_top150_sha256": "698b23d6cd73bec1b540dbacbfd36b1641ce1c684852a3a0dbf9059a38bf206c",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/dual_head_bandit_config.json",
+      "config_sha256": "5e4e9fec3107d3234ed16daa148d64d75dca00549adc7c02030600705f18368f",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/checkpoint_final.pt",
+      "checkpoint_sha256": "74a086fcad2f2134d24321df4132a2c3d1f2dc4694c867562e88fd5ad34b4944"
+    },
+    {
+      "profile": "discovery_heavy",
+      "preference": "r0.20_d0.80",
+      "seed": 48,
+      "source_ranking": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/final_rollout_rankings/r0.20_d0.80.csv",
+      "source_ranking_sha256": "1781036de57422d3e0a47691ac28fc699e63d36ea1194696aae717af0a36f0eb",
+      "frozen_top150": "/mnt/e/projects/rl-genrisk-main/outputs/discovery_validity_audit_20260909/frozen_candidates/discovery_heavy_r0.20_d0.80_seed48_top150.csv",
+      "frozen_top150_sha256": "16bed387d58daa12e238e487933a0f31da62826cd307271b009cd535a210092c",
+      "config": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/dual_head_bandit_config.json",
+      "config_sha256": "5e4e9fec3107d3234ed16daa148d64d75dca00549adc7c02030600705f18368f",
+      "checkpoint": "/mnt/e/projects/rl-genrisk-main/outputs/dual_head_bandit_20260908_210039_seed48/hybrid6_raw/seed_48_20260908_215312/checkpoint_final.pt",
+      "checkpoint_sha256": "74a086fcad2f2134d24321df4132a2c3d1f2dc4694c867562e88fd5ad34b4944"
+    }
+  ]
+}

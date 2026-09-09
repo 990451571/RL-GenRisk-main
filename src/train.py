@@ -132,6 +132,8 @@ ACTION_REWARD_LOG_FIELDNAMES = [
     "LowFrequencyEvidenceScoreV2",
     "base_reward",
     "evidence_bonus",
+    "reward_recovery_raw",
+    "reward_discovery_raw",
     "final_reward",
     "done",
     "terminal_reason",
@@ -334,6 +336,21 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=128, help="每次学习采样的批量大小。")
     parser.add_argument("--buffer_size", type=int, default=2048, help="优先经验回放池容量。")
     parser.add_argument("--gamma", type=float, default=0.95, help="折扣因子 gamma。")
+    parser.add_argument(
+        "--learning-mode",
+        choices=["ddqn", "contextual_bandit"],
+        default="ddqn",
+        help="ddqn 使用 TD bootstrap；contextual_bandit 仅拟合即时 r(s,a)。",
+    )
+    parser.add_argument(
+        "--history-ablation",
+        choices=["full", "no_history", "shuffled_history"],
+        default="full",
+        help=(
+            "Q 网络看到的已选基因历史：full=真实历史；no_history=固定空历史；"
+            "shuffled_history=保留已选数量但打乱基因身份。真实动作合法性与 reward 始终不变。"
+        ),
+    )
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="学习率。")
     parser.add_argument("--tau", type=float, default=0.001, help="目标网络软更新系数 tau。")
     parser.add_argument("--epsilon_start", type=float, default=1.0, help="初始随机探索概率。")
@@ -737,7 +754,17 @@ def build_environment(args, run_dir, normalization_metadata=None):
     }
 
 
-def build_agent(args, env, device):
+def build_agent(
+        args,
+        env,
+        device,
+        preference_dim=0,
+        q_preference_dim=None,
+        objective_dim=1,
+        vector_value_normalization="legacy_loss_scale",
+        vector_action_scalarization="normalized",
+        learning_mode="ddqn",
+):
     reward_weights = {
         "multiomics_mutation_weight": args.multiomics_mutation_weight,
         "multiomics_expression_weight": args.multiomics_expression_weight,
@@ -789,6 +816,12 @@ def build_agent(args, env, device):
         reward_weights=reward_weights,
         reward_feature_columns=env["feature_report"]["feature_columns"],
         lowfreq_evidence_by_gene=evidence_by_gene,
+        preference_dim=preference_dim,
+        q_preference_dim=q_preference_dim,
+        objective_dim=objective_dim,
+        vector_value_normalization=vector_value_normalization,
+        vector_action_scalarization=vector_action_scalarization,
+        learning_mode=learning_mode,
     )
     agent.Q.to(device)
     agent.Q_target.to(device)
@@ -835,6 +868,33 @@ def assert_finite(name, value, episode=None, step=None, action=None):
         )
 
 
+def model_history_mask(true_action_mask, args, episode, step):
+    """Return the history context visible to the Q network.
+
+    ``true_action_mask`` remains the sole source of action legality and is
+    always passed separately to DDQN's max-action calculation. These
+    ablations therefore do not alter the environment, reward, selected-action
+    set, or legal action space; they change only the selected-gene identity
+    used by Q_Fun's graph pooling context.
+    """
+    mask = np.asarray(true_action_mask, dtype=np.int64)
+    if mask.shape != (mask.size,) or not np.all((mask == 0) | (mask == 1)):
+        raise ValueError("true_action_mask must be a finite 0/1 vector.")
+    mode = getattr(args, "history_ablation", "full")
+    if mode == "full":
+        return mask.copy()
+    if mode == "no_history":
+        return np.ones_like(mask)
+    if mode == "shuffled_history":
+        # Dedicated local RNG: the shuffle must not consume global NumPy RNG
+        # draws, otherwise epsilon exploration/PER sampling would differ.
+        sequence = np.random.SeedSequence([
+            int(args.seed), int(episode), int(step), 0x48495354,
+        ])
+        return np.random.default_rng(sequence).permutation(mask)
+    raise ValueError(f"Unsupported history_ablation={mode!r}.")
+
+
 def optimize_model(agent, args, episode, step):
     if len(agent.memory) < args.warmup_steps or len(agent.memory) < args.batch_size:
         return None
@@ -862,7 +922,7 @@ def append_action_reward_log(run_dir, rows):
         writer.writerows(rows)
 
 
-def run_episode(agent, env, args, episode, run_dir=None):
+def run_episode(agent, env, args, episode, run_dir=None, preference=None):
     # 当前训练入口保留全局动作空间与动作掩码，不做 PPI 邻居扩展动作集。
     action_sel = list(range(agent.n_actions))
     agent.actions = []
@@ -880,20 +940,40 @@ def run_episode(agent, env, args, episode, run_dir=None):
     grad_values = []
     state = env["node_features"]
     action_reward_rows = []
+    if agent.preference_dim:
+        preference = np.asarray(preference, dtype=np.float32)
+        if preference.shape != (agent.preference_dim,):
+            raise ValueError(
+                f"preference must have shape ({agent.preference_dim},), got {preference.shape}."
+            )
+        if not np.isfinite(preference).all():
+            raise ValueError("preference contains NaN or Inf.")
+    elif preference is not None:
+        raise ValueError("preference was passed to a non-preference-conditioned agent.")
 
     while True:
         agent.epsilon = epsilon_for_step(args, agent.memory_counter)
         current_action_mask = agent.actions_index.copy()
+        current_history_mask = model_history_mask(
+            current_action_mask, args, episode, step_count
+        )
         state_tensor = torch.as_tensor(state, dtype=torch.float32, device=agent.Q.device)
-        mask_tensor = torch.as_tensor(
-            current_action_mask,
+        history_tensor = torch.as_tensor(
+            current_history_mask,
             dtype=torch.long,
             device=agent.Q.device,
         )
+        preference_tensor = (
+            torch.as_tensor(preference, dtype=torch.float32, device=agent.Q.device)
+            if preference is not None else None
+        )
         agent.Q.train()
         with torch.no_grad():
-            q_values, emb = agent.Q(agent.embedding, state_tensor, mask_tensor)
-        q_np = q_values.detach().cpu().numpy()
+            q_values, emb = agent.Q(
+                agent.embedding, state_tensor, history_tensor, preference=preference_tensor
+            )
+        action_q_values = agent.scalarize_q(q_values, preference_tensor) if agent.objective_dim == 2 else q_values
+        q_np = action_q_values.detach().cpu().numpy()
         assert_finite("Q values", q_np, episode, step_count)
         agent.embedding = emb.detach()
 
@@ -915,6 +995,9 @@ def run_episode(agent, env, args, episode, run_dir=None):
         agent.actions.append(action_index)
         agent.actions_index[action_index] = 0
         next_action_mask = agent.actions_index.copy()
+        next_history_mask = model_history_mask(
+            next_action_mask, args, episode, step_count + 1
+        )
 
         reward, done, _ = agent.step(
             env["net"],
@@ -961,6 +1044,8 @@ def run_episode(agent, env, args, episode, run_dir=None):
                 "LowFrequencyEvidenceScoreV2": float(component.get("LowFrequencyEvidenceScoreV2", 0.0)),
                 "base_reward": float(component.get("base_reward", 0.0)),
                 "evidence_bonus": float(component.get("evidence_bonus", 0.0)),
+                "reward_recovery_raw": float(component.get("reward_recovery_raw", 0.0)),
+                "reward_discovery_raw": float(component.get("reward_discovery_raw", 0.0)),
                 "final_reward": float(component.get("final_reward", reward)),
                 "done": bool(transition_done),
                 "terminal_reason": terminal_reason if transition_done else "",
@@ -970,13 +1055,17 @@ def run_episode(agent, env, args, episode, run_dir=None):
 
         # 经验池保存静态节点特征、动作执行前掩码、动作执行后掩码和终止标志。
         # 在动作执行前，当前掩码与下一掩码不能被错误地当作同一个状态。
+        replay_reward = agent.vector_reward() if agent.objective_dim == 2 else reward
         agent.remember(
             state,
             action_index,
-            reward,
+            replay_reward,
             current_action_mask,
             next_action_mask,
             transition_done,
+            preference=preference,
+            history_mask=current_history_mask,
+            next_history_mask=next_history_mask,
         )
 
         learn_metrics = optimize_model(agent, args, episode, step_count)
@@ -1000,6 +1089,14 @@ def run_episode(agent, env, args, episode, run_dir=None):
         "mean_loss": float(np.mean(loss_values)) if loss_values else "",
         "td_error_abs_mean": float(np.mean(td_values)) if td_values else "",
         "gradient_norm_mean": float(np.mean(grad_values)) if grad_values else "",
+        "objective_q_mean_recovery": float(agent.objective_value_mean[0]),
+        "objective_q_mean_discovery": (
+            float(agent.objective_value_mean[1]) if agent.objective_dim == 2 else ""
+        ),
+        "objective_q_scale_recovery": float(agent.objective_value_scale[0]),
+        "objective_q_scale_discovery": (
+            float(agent.objective_value_scale[1]) if agent.objective_dim == 2 else ""
+        ),
         "epsilon": agent.epsilon,
         "buffer_size": len(agent.memory),
         "learning_rate": args.learning_rate,
@@ -1115,6 +1212,16 @@ def checkpoint_payload(agent, args, env, episode, best_val_ndcg150):
         "optimizer_state_dict": agent.Q.optimizer.state_dict(),
         "best_val_ndcg150": float(best_val_ndcg150),
         "epsilon": float(agent.epsilon),
+        "objective_dim": int(agent.objective_dim),
+        "q_preference_dim": int(agent.q_preference_dim),
+        "vector_value_normalization": agent.vector_value_normalization,
+        "vector_action_scalarization": agent.vector_action_scalarization,
+        "learning_mode": agent.learning_mode,
+        "history_ablation": getattr(args, "history_ablation", "full"),
+        # Vector-Q action scalarization and normalized losses must use the
+        # learned head scales when a retained checkpoint is replayed.
+        "objective_value_scale": [float(value) for value in agent.objective_value_scale],
+        "objective_value_mean": [float(value) for value in agent.objective_value_mean],
         "seed": int(args.seed),
         "feature_mode": args.feature_mode,
         "feature_dim": int(env["feature_report"]["feature_dim"]),
@@ -1132,6 +1239,34 @@ def save_checkpoint(agent, args, env, path, episode, best_val_ndcg150):
 
 def load_checkpoint(agent, path, args, env):
     payload = torch.load(path, map_location=agent.Q.device, weights_only=False)
+    checkpoint_learning_mode = payload.get("learning_mode", "ddqn")
+    if checkpoint_learning_mode != agent.learning_mode:
+        raise ValueError(
+            f"恢复检查点的 learning_mode={checkpoint_learning_mode!r}，"
+            f"当前模型为 {agent.learning_mode!r}。"
+        )
+    checkpoint_history_ablation = payload.get("history_ablation", "full")
+    expected_history_ablation = getattr(args, "history_ablation", "full")
+    if checkpoint_history_ablation != expected_history_ablation:
+        raise ValueError(
+            f"恢复检查点的 history_ablation={checkpoint_history_ablation!r}，"
+            f"当前设置为 {expected_history_ablation!r}。"
+        )
+    checkpoint_normalization = payload.get("vector_value_normalization", "legacy_loss_scale")
+    if (
+            agent.objective_dim == 2
+            and checkpoint_normalization != agent.vector_value_normalization
+    ):
+        raise ValueError(
+            "恢复检查点的 vector_value_normalization="
+            f"{checkpoint_normalization!r}，当前模型为 {agent.vector_value_normalization!r}。"
+        )
+    checkpoint_scalarization = payload.get("vector_action_scalarization", "normalized")
+    if agent.objective_dim == 2 and checkpoint_scalarization != agent.vector_action_scalarization:
+        raise ValueError(
+            "恢复检查点的 vector_action_scalarization="
+            f"{checkpoint_scalarization!r}，当前模型为 {agent.vector_action_scalarization!r}。"
+        )
     expected_feature_mode = args.feature_mode
     expected_feature_dim = int(env["feature_report"]["feature_dim"])
     expected_feature_columns = inputall.canonicalize_feature_columns(
@@ -1166,6 +1301,20 @@ def load_checkpoint(agent, path, args, env):
     if "optimizer_state_dict" in payload:
         agent.Q.optimizer.load_state_dict(payload["optimizer_state_dict"])
     agent.epsilon = float(payload.get("epsilon", agent.epsilon))
+    saved_scale = payload.get("objective_value_scale")
+    if saved_scale is not None:
+        saved_scale = np.asarray(saved_scale, dtype=np.float32)
+        if saved_scale.shape != (agent.objective_dim,) or not np.isfinite(saved_scale).all() or np.any(saved_scale <= 0):
+            raise ValueError(
+                "恢复检查点中的 objective_value_scale 与当前 Q 目标数不兼容。"
+            )
+        agent.objective_value_scale = saved_scale
+    saved_mean = payload.get("objective_value_mean")
+    if saved_mean is not None:
+        saved_mean = np.asarray(saved_mean, dtype=np.float32)
+        if saved_mean.shape != (agent.objective_dim,) or not np.isfinite(saved_mean).all():
+            raise ValueError("恢复检查点中的 objective_value_mean 与当前 Q 目标数不兼容。")
+        agent.objective_value_mean = saved_mean
     return int(payload.get("episode", 0)) + 1, float(
         payload.get("best_val_ndcg150", float("-inf"))
     )
@@ -1262,6 +1411,9 @@ def build_training_metadata(args, env, agent):
         "max_steps": args.max_steps,
         "selection_budget": args.topk,
         "gamma": agent.gamma,
+        "learning_mode": agent.learning_mode,
+        "vector_action_scalarization": agent.vector_action_scalarization,
+        "history_ablation": getattr(args, "history_ablation", "full"),
         "tau": agent.tau,
         "learning_rate": args.learning_rate,
         "batch_size": args.batch_size,
@@ -1291,6 +1443,10 @@ def save_training_metrics(path, rows):
         "mean_loss",
         "td_error_abs_mean",
         "gradient_norm_mean",
+        "objective_q_mean_recovery",
+        "objective_q_mean_discovery",
+        "objective_q_scale_recovery",
+        "objective_q_scale_discovery",
         "epsilon",
         "buffer_size",
         "learning_rate",
@@ -1331,6 +1487,8 @@ def main():
     device = choose_device(args.device)
     logging.info("Feature mode: %s", args.feature_mode)
     logging.info("Reward mode: %s", args.reward_mode)
+    logging.info("Learning mode: %s", args.learning_mode)
+    logging.info("History ablation: %s", args.history_ablation)
     logging.info("本次训练输出目录：%s", run_dir)
     logging.info("训练设备：%s", device)
     resume_normalization_metadata = apply_resume_feature_metadata(args)
@@ -1344,7 +1502,7 @@ def main():
         raise ValueError(
             f"参数 --topk={args.topk} 超过 PPI 节点数 {len(env['gene_name'])}。"
         )
-    agent = build_agent(args, env, device)
+    agent = build_agent(args, env, device, learning_mode=args.learning_mode)
     config = {
         "args": vars(args),
         "run_dir": str(run_dir),
@@ -1359,6 +1517,8 @@ def main():
         "git_commit": get_git_commit(),
         "git_diff_sha256": get_git_diff_sha256(),
         "reward_config": agent.reward_config(),
+        "learning_mode": agent.learning_mode,
+        "history_ablation": args.history_ablation,
         "feature_report": env["feature_report"],
         "started_at": datetime.now(timezone.utc).isoformat(),
         "test_labels_read": False,

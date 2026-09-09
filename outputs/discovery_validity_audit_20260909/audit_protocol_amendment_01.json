@@ -1,0 +1,11 @@
+{
+  "amendment": "01_include_mutation_in_simple_baseline_decision",
+  "date": "2026-09-09",
+  "status": "logic-bug correction after initial automated report",
+  "original_protocol_file": "audit_protocol.json",
+  "reason": "The user explicitly required mutation as a retained baseline and referred to EvidenceScore, degree and other simple baselines. The first decision implementation accidentally omitted mutation when taking the strongest simple baseline.",
+  "correction": "The strongest simple baseline is the maximum of mutation, EvidenceScore, PPI degree and GRN degree. No threshold, ranking, seed, candidate or external-evidence definition changed.",
+  "effect_on_initial_automated_decision": "retain_bandit changed from true to false because mutation Top-150 independent-evidence hit rate was 0.420 and the best bandit profile was 0.360.",
+  "posthoc_sensitivity": "A non-mutation external-evidence union is reported only to diagnose whether CPTAC mutation recurrence drives the primary result. It is not used to reverse or replace the frozen primary decision.",
+  "test_labels_read": false
+}

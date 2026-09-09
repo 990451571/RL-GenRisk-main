@@ -74,6 +74,7 @@ def main():
     import torch.nn.functional as F
     import torch.optim as optim
     from qfunction import Q_Fun
+    import rd_definitions
     import train  # noqa: E402
 
     if args.device == "auto":
@@ -129,6 +130,13 @@ def main():
             range(n), key=lambda i: (-ev_score.get(gene_name[i], -1.0), gene_name[i])
         ),
     }
+    discovery_sets = rd_definitions.discovery_sets_from_evidence(
+        ev_df, train_drivers | val_drivers, cargs.rd_evidence_min
+    )
+    pool_precision = (
+        discovery_sets["n_evidence_supported"] / discovery_sets["n_lowfreq_novel"]
+        if discovery_sets["n_lowfreq_novel"] else 0.0
+    )
 
     # ---------- 监督模型 ----------
     def build_supervised_gcn():
@@ -165,6 +173,10 @@ def main():
         mean_rank = float(np.mean(present)) if present else None
         # 训练集记忆程度
         train_found = [g for g in train_drivers if rank_by_gene.get(g, 1e9) <= topk]
+        top_genes = [gene_name[i] for i in order[:topk]]
+        lowfreq = sum(gene in discovery_sets["lowfreq_novel"] for gene in top_genes)
+        supported = sum(gene in discovery_sets["evidence_supported"] for gene in top_genes)
+        discovery_precision = supported / lowfreq if lowfreq else 0.0
         print(f"    [{tag}] NDCG@150={item['NDCG']:.4f} Recall={item['Recall']:.3f} "
               f"Hits={item['HitCount']} MRR={mrr:.4f} "
               f"MeanRank={mean_rank if mean_rank else 'n/a':>7}"
@@ -173,6 +185,10 @@ def main():
             "Method": tag, "NDCG@150": item["NDCG"], "Recall@150": item["Recall"],
             "Precision@150": item["Precision"], "HitCount@150": item["HitCount"],
             "MRR": mrr, "MeanRank": mean_rank,
+            "LowFreqNovel@150": lowfreq,
+            "HighEvidenceLowFreqNovel@150": supported,
+            "DiscoveryPrecision@150": discovery_precision,
+            "DiscoveryFoldEnrichment@150": discovery_precision / pool_precision if pool_precision else 0.0,
         }, order, scores
 
     def train_supervised(model, tag, optimizer):
@@ -222,8 +238,10 @@ def main():
     _write_csv(rankings_dir, f"supervised_GCN_final.csv", gcn_order, gcn_scores, gene_name)
 
     # 监督 MLP（无图）—— 独立固定种子，与 GCN 无关
-    torch.manual_seed(0)
-    np.random.seed(0)
+    # Keep the MLP independent from the GCN initialization while preserving
+    # an honest seed-specific ranking for cross-seed stability analysis.
+    torch.manual_seed(cargs.seed + 17)
+    np.random.seed(cargs.seed + 17)
     mlp = MLPNoGraph(env["feature_report"]["feature_dim"], cargs.embedding_size).to(device)
     mlp_summary, mlp_order, mlp_scores = train_supervised(
         mlp, "supervised_MLP_no_graph",
@@ -234,7 +252,8 @@ def main():
 
     # 汇总表
     cols = ["Method", "Epoch", "TrainBCE", "NDCG@150", "Recall@150", "Precision@150",
-            "HitCount@150", "MRR", "MeanRank"]
+            "HitCount@150", "MRR", "MeanRank", "LowFreqNovel@150",
+            "HighEvidenceLowFreqNovel@150", "DiscoveryPrecision@150", "DiscoveryFoldEnrichment@150"]
     table_path = output_root / "supervised_summary.csv"
     with table_path.open("w", encoding="utf-8", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
